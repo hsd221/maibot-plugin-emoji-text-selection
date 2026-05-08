@@ -1,5 +1,5 @@
 {
-  "manifest_version": 2,
+  "manifest_version": 1,
   "version": "0.1.0",
   "name": "emoji_text_selection",
   "description": "纯文本表情选择插件——绕过内置 VLM 表情选择，用 Levenshtein 文本匹配发送表情。",
@@ -34,5 +34,7 @@
       "en-US"
     ]
   },
-  "id": "maibot-team.emoji-text-selection"
+  "id": "maibot-team.emoji-text-selection",
+  "repository_url": "https://github.com/hsd221/maibot-plugin-emoji-text-selection",
+  "homepage_url": "https://github.com/hsd221/maibot-plugin-emoji-text-selection"
 }
