@@ -4,8 +4,8 @@
   "name": "emoji_text_selection",
   "description": "纯文本表情选择插件——绕过内置 VLM 表情选择，用 Levenshtein 文本匹配发送表情。",
   "author": {
-    "name": "MaiBot Team",
-    "url": "https://github.com/MaiM-with-u"
+    "name": "hsd221",
+    "url": "https://github.com/hsd221"
   },
   "license": "GPL-v3.0-or-later",
   "urls": {
