@@ -1,0 +1,38 @@
+{
+  "manifest_version": 2,
+  "version": "0.1.0",
+  "name": "emoji_text_selection",
+  "description": "纯文本表情选择插件——绕过内置 VLM 表情选择，用 Levenshtein 文本匹配发送表情。",
+  "author": {
+    "name": "MaiBot Team",
+    "url": "https://github.com/MaiM-with-u"
+  },
+  "license": "GPL-v3.0-or-later",
+  "urls": {
+    "repository": "https://github.com/MaiM-with-u/maibot",
+    "homepage": "https://github.com/MaiM-with-u/maibot",
+    "documentation": "https://github.com/MaiM-with-u/maibot",
+    "issues": "https://github.com/MaiM-with-u/maibot/issues"
+  },
+  "host_application": {
+    "min_version": "1.0.0",
+    "max_version": "1.99.99"
+  },
+  "sdk": {
+    "min_version": "2.0.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [],
+  "capabilities": [
+    "emoji.get_by_description",
+    "send.emoji"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": [
+      "zh-CN",
+      "en-US"
+    ]
+  },
+  "id": "maibot-team.emoji-text-selection"
+}

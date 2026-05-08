@@ -1,0 +1,6 @@
+# emoji_text_selection 插件配置
+# 纯文本表情选择插件 —— 绕过内置 VLM 表情选择，用纯文本模型完成表情包选择与发送。
+
+[plugin]
+# 是否启用此插件
+enabled = true

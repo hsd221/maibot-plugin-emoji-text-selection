@@ -1,0 +1,7 @@
+{
+  "plugin.name": "Text Emoji Selection",
+  "plugin.description": "Bypass built-in VLM emoji selection using Levenshtein text matching.",
+  "tool.send_emoji_text.name": "Send Emoji",
+  "tool.send_emoji_text.description": "Select and send an appropriate emoji sticker",
+  "tool.send_emoji_text.param.emotion": "Emotion label to express"
+}
