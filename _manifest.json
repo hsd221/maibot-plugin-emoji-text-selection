@@ -9,10 +9,10 @@
   },
   "license": "GPL-v3.0-or-later",
   "urls": {
-    "repository": "https://github.com/MaiM-with-u/maibot",
-    "homepage": "https://github.com/MaiM-with-u/maibot",
-    "documentation": "https://github.com/MaiM-with-u/maibot",
-    "issues": "https://github.com/MaiM-with-u/maibot/issues"
+    "repository": "https://github.com/hsd221/maibot-plugin-emoji-text-selection",
+    "homepage": "https://github.com/hsd221/maibot-plugin-emoji-text-selection",
+    "documentation": "https://github.com/hsd221/maibot-plugin-emoji-text-selection",
+    "issues": "https://github.com/hsd221/maibot-plugin-emoji-text-selection/issues"
   },
   "host_application": {
     "min_version": "1.0.0",
