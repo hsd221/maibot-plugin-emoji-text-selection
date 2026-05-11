@@ -1,6 +1,11 @@
-# emoji_text_selection 插件配置
-# 纯文本表情选择插件 —— 绕过内置 VLM 表情选择，用纯文本模型完成表情包选择与发送。
-
 [plugin]
-# 是否启用此插件
-enabled = true
+config_version = "1.0.0"
+
+# 传给 LLM 的最大情绪标签数量，0 表示不限制
+max_emotion_tags = 80
+
+# LLM 最多选择的标签数
+max_selected_tags = 5
+
+# 标签选择用的模型任务名，空字符串表示使用默认 text 模型
+llm_model = ""

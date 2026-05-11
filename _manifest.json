@@ -1,8 +1,8 @@
 {
-  "manifest_version": 1,
-  "version": "0.1.0",
-  "name": "emoji_text_selection",
-  "description": "纯文本表情选择插件——绕过内置 VLM 表情选择，用 Levenshtein 文本匹配发送表情。",
+  "manifest_version": 2,
+  "version": "1.0.0",
+  "name": "Emoji Text Selector",
+  "description": "纯文本情绪标签匹配的表情包选择工具。LLM 根据上下文从情绪标签列表中选出最合适的标签，插件按标签精确匹配并发送表情包。",
   "author": {
     "name": "hsd221",
     "url": "https://github.com/hsd221"
@@ -24,17 +24,14 @@
   },
   "dependencies": [],
   "capabilities": [
-    "emoji.get_by_description",
-    "send.emoji"
+    "send.emoji",
+    "emoji.get_emotions",
+    "emoji.get_all",
+    "llm.generate"
   ],
   "i18n": {
     "default_locale": "zh-CN",
-    "supported_locales": [
-      "zh-CN",
-      "en-US"
-    ]
+    "supported_locales": ["zh-CN"]
   },
-  "id": "maibot-team.emoji-text-selection",
-  "repository_url": "https://github.com/hsd221/maibot-plugin-emoji-text-selection",
-  "homepage_url": "https://github.com/hsd221/maibot-plugin-emoji-text-selection"
+  "id": "hsd221.emoji-text-selector"
 }

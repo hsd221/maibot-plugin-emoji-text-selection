@@ -1,7 +1,0 @@
-{
-  "plugin.name": "纯文本表情选择",
-  "plugin.description": "绕过内置VLM表情选择，用文本匹配发送表情。",
-  "tool.send_emoji_text.name": "发送表情",
-  "tool.send_emoji_text.description": "选择合适的表情包并发送",
-  "tool.send_emoji_text.param.emotion": "想要表达的情绪标签"
-}
