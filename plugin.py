@@ -329,3 +329,8 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                 f"[EmojiTextSelector] 工具执行异常: {exc}", exc_info=True
             )
             return {"success": False, "error": str(exc)}
+
+
+def create_plugin() -> EmojiTextSelectorPlugin:
+    """插件工厂函数，由 SDK Runner 调用以创建插件实例。"""
+    return EmojiTextSelectorPlugin()
