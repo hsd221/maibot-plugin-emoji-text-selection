@@ -23,9 +23,22 @@ from pydantic import Field
 # ─── 配置模型 ───────────────────────────────────────────────────
 
 
+class PluginSectionConfig(PluginConfigBase):
+    """插件基础配置节，对应 config.toml 中的 [plugin] 节。"""
+
+    config_version: str = Field(
+        default="1.0.0",
+        description="配置版本号",
+    )
+
+
 class EmojiTextSelectorConfig(PluginConfigBase):
     """插件配置。"""
 
+    plugin: PluginSectionConfig = Field(
+        default_factory=PluginSectionConfig,
+        description="插件基础配置",
+    )
     max_emotion_tags: int = Field(
         default=80,
         description="传给 LLM 的最大情绪标签数量，0 表示不限制",
@@ -37,10 +50,6 @@ class EmojiTextSelectorConfig(PluginConfigBase):
     llm_model: str = Field(
         default="",
         description="标签选择用的模型任务名，空字符串表示使用默认 text 模型",
-    )
-    config_version: str = Field(
-        default="1.0.0",
-        description="配置版本号",
     )
 
 
