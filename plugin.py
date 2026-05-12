@@ -230,30 +230,26 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                 )
 
             # 3. 按优先级逐个查询表情包
+            # SDK 已将 host 返回的 {"success":True, "emoji":{...}}
+            # 自动解包为 emoji dict {"base64":"...", "description":"..."}
             chosen: dict[str, str] | None = None
             matched_tag_info = "随机选择"
 
             for tag in selected_tags:
                 result = await self.ctx.emoji.get_by_description(tag)
-                if isinstance(result, dict) and result.get("success"):
-                    emoji_data = result.get("emoji")
-                    if emoji_data:
-                        chosen = emoji_data
-                        matched_tag_info = f"命中标签: {tag}"
-                        break
+                if isinstance(result, dict) and result.get("base64"):
+                    chosen = result
+                    matched_tag_info = f"命中标签: {tag}"
+                    break
 
             # 4. 未命中则随机兜底
+            # SDK 已将 get_random 结果自动解包为 emoji list
             if chosen is None:
                 self.ctx.logger.info("[EmojiTextSelector] 标签匹配失败，降级为随机选择")
                 random_result = await self.ctx.emoji.get_random(count=1)
-                random_emojis = (
-                    random_result.get("emojis", [])
-                    if isinstance(random_result, dict)
-                    else []
-                )
-                if not random_emojis:
+                if not random_result or not isinstance(random_result, list):
                     return {"success": False, "error": "表情包库为空"}
-                chosen = random_emojis[0]
+                chosen = random_result[0]
 
             # 5. 发送
             emoji_base64 = chosen.get("base64", "")
