@@ -53,9 +53,9 @@ class EmojiTextSelectorConfig(PluginConfigBase):
         description="LLM 最多选择的标签数",
         json_schema_extra={"label": "最多选择标签数"},
     )
-    llm_model: Literal["", "emoji", "utils", "planner", "reply"] = Field(
-        default="",
-        description="标签选择用的模型任务名，空字符串表示使用默认 text 模型",
+    llm_model: Literal["emoji", "utils", "planner", "reply"] = Field(
+        default="emoji",
+        description="标签选择用的模型任务名",
         json_schema_extra={"label": "LLM 模型"},
     )
 
