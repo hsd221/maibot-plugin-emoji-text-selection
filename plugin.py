@@ -220,6 +220,30 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
             self._config = EmojiTextSelectorConfig()
         return self._config
 
+    @classmethod
+    def build_config_schema(
+        cls,
+        *,
+        plugin_id: str = "",
+        plugin_name: str = "",
+        plugin_version: str = "",
+        plugin_description: str = "",
+        plugin_author: str = "",
+    ) -> dict[str, Any]:
+        schema = super().build_config_schema(
+            plugin_id=plugin_id,
+            plugin_name=plugin_name,
+            plugin_version=plugin_version,
+            plugin_description=plugin_description,
+            plugin_author=plugin_author,
+        )
+        # 隐藏 [plugin] 节（含 config_version），普通用户无需关心
+        schema.get("sections", {}).pop("plugin", None)
+        # 隐藏 llm_model 高级选项，普通用户用默认模型即可
+        general = schema.get("sections", {}).get("general", {})
+        general.get("fields", {}).pop("llm_model", None)
+        return schema
+
     # ─── 生命周期 ────────────────────────────────────────────
 
     async def on_load(self) -> None:
