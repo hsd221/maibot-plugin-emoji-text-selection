@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import random
 from itertools import combinations
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from maibot_sdk import MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.types import ToolParameterInfo, ToolParamType
@@ -53,7 +53,7 @@ class EmojiTextSelectorConfig(PluginConfigBase):
         description="LLM 最多选择的标签数",
         json_schema_extra={"label": "最多选择标签数"},
     )
-    llm_model: str = Field(
+    llm_model: Literal["", "emoji", "utils", "planner", "reply"] = Field(
         default="",
         description="标签选择用的模型任务名，空字符串表示使用默认 text 模型",
         json_schema_extra={"label": "LLM 模型"},
@@ -239,9 +239,6 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
         )
         # 隐藏 [plugin] 节（含 config_version），普通用户无需关心
         schema.get("sections", {}).pop("plugin", None)
-        # 隐藏 llm_model 高级选项，普通用户用默认模型即可
-        general = schema.get("sections", {}).get("general", {})
-        general.get("fields", {}).pop("llm_model", None)
         return schema
 
     # ─── 生命周期 ────────────────────────────────────────────
