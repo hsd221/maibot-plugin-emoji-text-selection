@@ -26,6 +26,10 @@ from pydantic import Field
 class PluginSectionConfig(PluginConfigBase):
     """插件基础配置节，对应 config.toml 中的 [plugin] 节。"""
 
+    __ui_label__ = "插件"
+    __ui_icon__ = "package"
+    __ui_order__ = 0
+
     config_version: str = Field(
         default="1.0.0",
         description="配置版本号",
@@ -34,6 +38,10 @@ class PluginSectionConfig(PluginConfigBase):
 
 class EmojiTextSelectorConfig(PluginConfigBase):
     """插件配置。"""
+
+    __ui_label__ = "表情包选择"
+    __ui_icon__ = "image"
+    __ui_order__ = 1
 
     plugin: PluginSectionConfig = Field(
         default_factory=PluginSectionConfig,
