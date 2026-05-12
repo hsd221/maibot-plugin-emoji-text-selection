@@ -24,40 +24,39 @@ from pydantic import Field
 
 
 class PluginSectionConfig(PluginConfigBase):
-    """插件基础配置节，对应 config.toml 中的 [plugin] 节。"""
+    """插件基础配置。"""
 
     __ui_label__ = "插件"
-    __ui_icon__ = "package"
-    __ui_order__ = 0
 
     config_version: str = Field(
         default="1.0.0",
         description="配置版本号",
+        json_schema_extra={"label": "配置版本"},
     )
 
 
 class EmojiTextSelectorConfig(PluginConfigBase):
-    """插件配置。"""
+    """表情包文本选择器配置。"""
 
-    __ui_label__ = "表情包选择"
-    __ui_icon__ = "image"
-    __ui_order__ = 1
+    __ui_label__ = "表情包文本选择器"
 
     plugin: PluginSectionConfig = Field(
         default_factory=PluginSectionConfig,
-        description="插件基础配置",
     )
     max_emotion_tags: int = Field(
         default=80,
         description="传给 LLM 的最大情绪标签数量，0 表示不限制",
+        json_schema_extra={"label": "最大情绪标签数"},
     )
     max_selected_tags: int = Field(
         default=5,
         description="LLM 最多选择的标签数",
+        json_schema_extra={"label": "最多选择标签数"},
     )
     llm_model: str = Field(
         default="",
         description="标签选择用的模型任务名，空字符串表示使用默认 text 模型",
+        json_schema_extra={"label": "LLM 模型"},
     )
 
 
