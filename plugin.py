@@ -28,6 +28,11 @@ class PluginSectionConfig(PluginConfigBase):
 
     __ui_label__ = "插件"
 
+    enabled: bool = Field(
+        default=True,
+        description="是否启用插件",
+        json_schema_extra={"label": "启用"},
+    )
     config_version: str = Field(
         default="1.0.0",
         description="配置版本号",
