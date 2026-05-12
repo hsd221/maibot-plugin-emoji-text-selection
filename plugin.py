@@ -11,8 +11,6 @@ LLM 通过 ``tool_search`` 发现后调用，插件会：
 from __future__ import annotations
 
 import json
-import random
-from itertools import combinations
 from typing import Any, ClassVar, Literal
 
 from maibot_sdk import MaiBotPlugin, PluginConfigBase, Tool
@@ -98,98 +96,6 @@ def _parse_llm_tags(response_text: str, max_tags: int = 5) -> list[str]:
             continue
 
     return []
-
-
-def _split_tags(description: str) -> list[str]:
-    """将逗号分隔的描述文本拆分为去重标签列表。"""
-    if not description or not description.strip():
-        return []
-    items = [
-        item.strip()
-        for item in description.replace("，", ",").replace("、", ",").split(",")
-    ]
-    seen: set[str] = set()
-    result: list[str] = []
-    for item in items:
-        if item and item not in seen:
-            seen.add(item)
-            result.append(item)
-    return result
-
-
-def _emoji_has_all_tags(emoji_tags: list[str], target_tags: list[str]) -> bool:
-    """表情包标签是否包含全部目标标签（精确匹配）。"""
-    return all(tag in emoji_tags for tag in target_tags)
-
-
-def _match_emojis_by_tags(
-    emojis: list[dict[str, str]],
-    selected_tags: list[str],
-) -> list[dict[str, str]] | None:
-    """按幂集降级匹配表情包。
-
-    selected_tags 按优先级从高到低排列。
-    优先匹配全部标签的交集，逐步降级到单标签匹配。
-    """
-    if not selected_tags or not emojis:
-        return None
-
-    emoji_tag_cache: list[tuple[dict[str, str], list[str]]] = [
-        (emoji, _split_tags(emoji.get("description", "")))
-        for emoji in emojis
-    ]
-
-    n = len(selected_tags)
-    for size in range(n, 0, -1):
-        subsets = _generate_tag_subsets(selected_tags, size)
-        for tag_subset in subsets:
-            matched = [
-                emoji
-                for emoji, tags in emoji_tag_cache
-                if _emoji_has_all_tags(tags, tag_subset)
-            ]
-            if matched:
-                return matched
-
-    return None
-
-
-def _generate_tag_subsets(
-    selected_tags: list[str], size: int
-) -> list[list[str]]:
-    """生成指定大小的标签子集，优先保留高优先级标签。"""
-    n = len(selected_tags)
-    if size >= n:
-        return [list(selected_tags)]
-
-    subsets: list[list[str]] = []
-    seen: set[str] = set()
-
-    if size == 1:
-        for tag in selected_tags:
-            if tag not in seen:
-                seen.add(tag)
-                subsets.append([tag])
-        return subsets
-
-    # 包含第一个（最高优先级）标签的组合
-    for combo in combinations(range(1, n), size - 1):
-        indices = (0,) + combo
-        subset = [selected_tags[i] for i in indices]
-        key = ",".join(subset)
-        if key not in seen:
-            seen.add(key)
-            subsets.append(subset)
-
-    # 不包含第一个标签的组合
-    for combo in combinations(range(1, n), size):
-        subset = [selected_tags[i] for i in combo]
-        key = ",".join(subset)
-        if key not in seen:
-            seen.add(key)
-            subsets.append(subset)
-
-    return subsets
 
 
 def _build_selection_prompt(emotions: list[str], context_hint: str = "") -> str:
@@ -283,8 +189,11 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
     ) -> dict[str, Any]:
         """处理 select_emoji 工具调用。
 
-        Host 自动注入 stream_id。插件从 Host 获取全量情绪标签和表情包列表，
-        调用文本 LLM 选择标签，按幂集降级匹配后发送。
+        1. 获取全量情绪标签（纯文本，数据量小）
+        2. 调用文本 LLM 选出最匹配的 1-5 个标签
+        3. 按优先级逐个调用 get_by_description 查询（host 端相似度匹配，
+           每次只传回一张表情包，避免全量 base64 传输）
+        4. 全 miss 则随机兜底
         """
         del kwargs
 
@@ -320,25 +229,31 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                     f" LLM 返回: {response_text[:200]}"
                 )
 
-            # 3. 获取全量表情包
-            all_emojis: list[dict[str, str]] = await self.ctx.emoji.get_all()
-            if not all_emojis:
-                return {"success": False, "error": "表情包库为空"}
+            # 3. 按优先级逐个查询表情包
+            chosen: dict[str, str] | None = None
+            matched_tag_info = "随机选择"
 
-            # 4. 匹配
-            if selected_tags:
-                matched = _match_emojis_by_tags(all_emojis, selected_tags)
-            else:
-                matched = None
+            for tag in selected_tags:
+                result = await self.ctx.emoji.get_by_description(tag)
+                if isinstance(result, dict) and result.get("success"):
+                    emoji_data = result.get("emoji")
+                    if emoji_data:
+                        chosen = emoji_data
+                        matched_tag_info = f"命中标签: {tag}"
+                        break
 
-            if not matched:
-                # 降级：随机选一个
-                chosen = random.choice(all_emojis)
-                self.ctx.logger.info(
-                    "[EmojiTextSelector] 标签匹配失败，使用随机表情包"
+            # 4. 未命中则随机兜底
+            if chosen is None:
+                self.ctx.logger.info("[EmojiTextSelector] 标签匹配失败，降级为随机选择")
+                random_result = await self.ctx.emoji.get_random(count=1)
+                random_emojis = (
+                    random_result.get("emojis", [])
+                    if isinstance(random_result, dict)
+                    else []
                 )
-            else:
-                chosen = random.choice(matched)
+                if not random_emojis:
+                    return {"success": False, "error": "表情包库为空"}
+                chosen = random_emojis[0]
 
             # 5. 发送
             emoji_base64 = chosen.get("base64", "")
@@ -350,9 +265,6 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                 return {"success": False, "error": "发送表情包失败"}
 
             description = chosen.get("description", "")
-            matched_tag_info = (
-                f"命中标签: {selected_tags}" if selected_tags else "随机选择"
-            )
             self.ctx.logger.info(
                 f"[EmojiTextSelector] 表情包发送成功。"
                 f" 描述: {description}, {matched_tag_info}"
