@@ -23,12 +23,7 @@
     "max_version": "2.99.99"
   },
   "dependencies": [],
-  "capabilities": [
-    "send.emoji",
-    "emoji.get_emotions",
-    "emoji.get_all",
-    "llm.generate"
-  ],
+  "capabilities": ["send.emoji", "emoji.get_emotions", "emoji.get_by_description", "emoji.get_random", "llm.generate"],
   "i18n": {
     "default_locale": "zh-CN",
     "supported_locales": ["zh-CN"]
