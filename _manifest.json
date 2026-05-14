@@ -1,6 +1,6 @@
 {
   "manifest_version": 2,
-  "version": "1.0.0",
+  "version": "1.2.0",
   "name": "Emoji Text Selector",
   "description": "纯文本情绪标签匹配的表情包选择工具。LLM 根据上下文从情绪标签列表中选出最合适的标签，插件按标签精确匹配并发送表情包。",
   "author": {
@@ -23,7 +23,7 @@
     "max_version": "2.99.99"
   },
   "dependencies": [],
-  "capabilities": ["send.emoji", "emoji.get_emotions", "emoji.get_by_description", "emoji.get_random", "llm.generate"],
+  "capabilities": ["send.emoji", "emoji.get_emotions", "emoji.get_by_description", "llm.generate", "message.get_recent"],
   "i18n": {
     "default_locale": "zh-CN",
     "supported_locales": ["zh-CN"]

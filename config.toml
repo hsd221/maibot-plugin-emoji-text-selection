@@ -1,11 +1,9 @@
 [plugin]
+enabled = true
 config_version = "1.0.0"
 
-# 传给 LLM 的最大情绪标签数量，0 表示不限制
-max_emotion_tags = 80
-
-# LLM 最多选择的标签数
+[selector]
+max_emotion_tags = 50
 max_selected_tags = 5
-
-# 标签选择用的模型任务名，空字符串表示使用默认 text 模型
-llm_model = ""
+llm_model = "emoji"
+filter_send_emoji = true

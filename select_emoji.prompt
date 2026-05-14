@@ -1,0 +1,7 @@
+阅读以下对话上下文，根据对话的情绪基调，从{emoji_count}个表情包描述中选择最匹配的一个：
+
+{conversation_context}
+{emotion_hint_block}
+{description_list}
+
+仅返回JSON：{{"selected": 3}}（单个编号）
