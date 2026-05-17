@@ -248,6 +248,14 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
         schema.get("sections", {}).pop("plugin", None)
         return schema
 
+    def get_components(self) -> list[dict[str, Any]]:
+        components = super().get_components()
+        for comp in components:
+            inner = comp.get("metadata", {}).get("metadata")
+            if isinstance(inner, dict) and "core_tool" in inner:
+                comp["metadata"]["core_tool"] = inner["core_tool"]
+        return components
+
     # ─── 生命周期 ────────────────────────────────────────────
 
     async def on_load(self) -> None:
