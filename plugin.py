@@ -66,6 +66,11 @@ class EmojiSelectorSectionConfig(PluginConfigBase):
         description="启用后从 planner 工具列表移除内置 send_emoji，避免 LLM 绕过本插件直接发送",
         json_schema_extra={"label": "过滤原生 send_emoji"},
     )
+    tool_discovery: Literal["始终发现", "按需发现"] = Field(
+        default="始终发现",
+        description="始终发现：每次对话都提供 select_emoji 工具；按需发现：LLM 需要时通过 tool_search 自行搜索",
+        json_schema_extra={"label": "工具发现模式"},
+    )
 
 
 class EmojiTextSelectorConfig(PluginConfigBase):
@@ -222,16 +227,6 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
 
     config_model: ClassVar[type[PluginConfigBase] | None] = EmojiTextSelectorConfig
 
-    def __init__(self) -> None:
-        super().__init__()
-        self._config: EmojiTextSelectorConfig | None = None
-
-    @property
-    def config(self) -> EmojiTextSelectorConfig:
-        if self._config is None:
-            self._config = EmojiTextSelectorConfig()
-        return self._config
-
     @classmethod
     def build_config_schema(
         cls,
@@ -266,7 +261,6 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
     ) -> None:
         if scope == "self":
             self.set_plugin_config(config_data)
-            self._config = None  # 下次访问时重建
 
     # ─── Tool: select_emoji ──────────────────────────────────
 
@@ -435,24 +429,35 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
         mode=HookMode.BLOCKING,
     )
     async def filter_send_emoji_tool(self, **kwargs: Any) -> dict[str, Any]:
-        """根据配置决定是否从 planner 工具列表里移除内置 send_emoji。"""
-        if not self.config.selector.filter_send_emoji:
-            return {"modified_kwargs": kwargs}
+        """根据配置决定是否从 planner 工具列表中移除 send_emoji / select_emoji。"""
         tools = kwargs.get("tool_definitions")
-        if isinstance(tools, list):
-            before_count = len(tools)
-            kwargs["tool_definitions"] = [
-                t for t in tools
-                if not (
-                    isinstance(t, dict)
-                    and t.get("function", {}).get("name") == "send_emoji"
-                )
-            ]
-            after_count = len(kwargs["tool_definitions"])
-            self.ctx.logger.debug(
-                f"[EmojiTextSelector] filter_send_emoji: "
-                f"{before_count} → {after_count} tools"
+        if not isinstance(tools, list):
+            return {"modified_kwargs": kwargs}
+
+        names_to_remove: set[str] = set()
+
+        if self.config.selector.filter_send_emoji:
+            names_to_remove.add("send_emoji")
+
+        if self.config.selector.tool_discovery == "按需发现":
+            names_to_remove.add("select_emoji")
+
+        if not names_to_remove:
+            return {"modified_kwargs": kwargs}
+
+        before_count = len(tools)
+        kwargs["tool_definitions"] = [
+            t for t in tools
+            if not (
+                isinstance(t, dict)
+                and t.get("function", {}).get("name") in names_to_remove
             )
+        ]
+        after_count = len(kwargs["tool_definitions"])
+        self.ctx.logger.debug(
+            f"[EmojiTextSelector] filter: {before_count} → {after_count} tools, "
+            f"removed: {names_to_remove}"
+        )
         return {"modified_kwargs": kwargs}
 
 

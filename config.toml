@@ -7,3 +7,4 @@ max_emotion_tags = 50
 max_selected_tags = 5
 llm_model = "emoji"
 filter_send_emoji = true
+tool_discovery = "始终发现"
