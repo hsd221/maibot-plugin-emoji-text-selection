@@ -12,13 +12,22 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple
 
+import numpy as np
 from maibot_sdk import HookHandler, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.types import HookMode, ToolParameterInfo, ToolParamType
 from pydantic import Field
+
+logger = logging.getLogger("emoji_text_selector")
+
+# 向量缓存持久化文件名
+_VECTOR_CACHE_FILE = "emoji_vector_cache.npz"
+_VECTOR_CACHE_META_FILE = "emoji_vector_cache_meta.json"
 
 
 # ─── 配置模型 ───────────────────────────────────────────────────
@@ -62,7 +71,7 @@ class EmojiSelectorSectionConfig(PluginConfigBase):
         json_schema_extra={"label": "LLM 模型"},
     )
     filter_send_emoji: bool = Field(
-        default=False,
+        default=True,
         description="启用后从 planner 工具列表移除内置 send_emoji，避免 LLM 绕过本插件直接发送",
         json_schema_extra={"label": "过滤原生 send_emoji"},
     )
@@ -70,6 +79,30 @@ class EmojiSelectorSectionConfig(PluginConfigBase):
         default="始终发现",
         description="始终发现：每次对话都提供 select_emoji 工具；按需发现：LLM 需要时通过 tool_search 自行搜索",
         json_schema_extra={"label": "工具发现模式"},
+    )
+
+
+class SemanticSectionConfig(PluginConfigBase):
+    """语义向量匹配配置。"""
+
+    __ui_label__ = "语义匹配"
+    __ui_icon__ = "search"
+    __ui_order__ = 2
+
+    enabled: bool = Field(
+        default=False,
+        description="启用后优先使用 embedding 向量匹配选择表情包，失败时降级为文本 LLM 选择",
+        json_schema_extra={"label": "启用语义匹配"},
+    )
+    refresh_interval_seconds: int = Field(
+        default=300,
+        description="向量缓存刷新间隔（秒）",
+        json_schema_extra={"label": "缓存刷新间隔"},
+    )
+    similarity_threshold: float = Field(
+        default=0.3,
+        description="最低余弦相似度阈值，低于此值的表情包不会被选中",
+        json_schema_extra={"label": "相似度阈值"},
     )
 
 
@@ -84,6 +117,9 @@ class EmojiTextSelectorConfig(PluginConfigBase):
     selector: EmojiSelectorSectionConfig = Field(
         default_factory=EmojiSelectorSectionConfig,
     )
+    semantic: SemanticSectionConfig = Field(
+        default_factory=SemanticSectionConfig,
+    )
 
 
 # ─── 提示词模板 ───────────────────────────────────────────────────
@@ -92,7 +128,7 @@ _PROMPT_DIR = Path(__file__).parent
 _SELECTION_PROMPT_PATH = _PROMPT_DIR / "select_emoji.prompt"
 
 _FALLBACK_SELECTION_PROMPT = """\
-阅读以下对话上下文，根据对话的情绪基调，从{emoji_count}个表情包描述中选择最匹配的一个：
+阅读以下对话上下文和当前想表达的情感，从{emoji_count}个表情包描述中选择最匹配的一个：
 
 {conversation_context}
 {emotion_hint_block}
@@ -161,21 +197,37 @@ def _build_conversation_context(messages: list[dict[str, Any]]) -> str:
 def _build_selection_prompt(
     descriptions: list[str],
     conversation_context: str = "",
-    emotion_hint: str = "",
+    emotion_expression: str = "",
 ) -> str:
     """构建发给文本 LLM 的表情包选择 prompt。从 .prompt 文件加载模板。"""
     template = _load_prompt_template()
-    return template.format(
-        emoji_count=str(len(descriptions)),
-        conversation_context=conversation_context,
-        emotion_hint_block=(
-            f"辅助参考——planner 判断的情绪倾向：{emotion_hint}"
-            if emotion_hint else ""
-        ),
-        description_list="\n".join(
-            f"{i+1}. {d}" for i, d in enumerate(descriptions)
-        ),
-    )
+    try:
+        return template.format(
+            emoji_count=str(len(descriptions)),
+            conversation_context=conversation_context,
+            emotion_hint_block=(
+                f"当前想表达的情感：{emotion_expression}"
+                if emotion_expression else ""
+            ),
+            description_list="\n".join(
+                f"{i+1}. {d}" for i, d in enumerate(descriptions)
+            ),
+        )
+    except KeyError:
+        logger.warning(
+            "[EmojiTextSelector] 自定义 prompt 模板包含未知变量，回退到内置模板"
+        )
+        return _FALLBACK_SELECTION_PROMPT.format(
+            emoji_count=str(len(descriptions)),
+            conversation_context=conversation_context,
+            emotion_hint_block=(
+                f"当前想表达的情感：{emotion_expression}"
+                if emotion_expression else ""
+            ),
+            description_list="\n".join(
+                f"{i+1}. {d}" for i, d in enumerate(descriptions)
+            ),
+        )
 
 
 def _parse_llm_index(response_text: str, max_count: int) -> int | None:
@@ -213,19 +265,177 @@ def _parse_llm_index(response_text: str, max_count: int) -> int | None:
                     idx = int(raw)
                     if 1 <= idx <= max_count:
                         return idx
-        except (json.JSONDecodeError, TypeError, ValueError):
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
             continue
 
     return None
+
+
+# ─── Embedding 向量缓存 ────────────────────────────────────────
+
+
+class EmojiEmbeddingCache:
+    """表情包描述 embedding 向量缓存，使用 numpy 矩阵加速检索。"""
+
+    def __init__(self) -> None:
+        self._ids: np.ndarray = np.array([], dtype=np.int64)
+        self._text_keys: Dict[int, str] = {}
+        self._emotion_tags: Dict[int, str] = {}
+        self._matrix: Optional[np.ndarray] = None
+        self._last_refresh_time: float = 0.0
+        self._refreshing: bool = False
+
+    @property
+    def is_empty(self) -> bool:
+        return len(self._ids) == 0
+
+    @property
+    def count(self) -> int:
+        return len(self._ids)
+
+    def needs_refresh(self, interval_seconds: int) -> bool:
+        if self._refreshing:
+            return False
+        return (time.time() - self._last_refresh_time) > interval_seconds
+
+    def rebuild(
+        self,
+        ids: List[int],
+        text_keys: Dict[int, str],
+        emotion_tags: Dict[int, str],
+        matrix: np.ndarray,
+    ) -> None:
+        """用预处理好的数据重建缓存。"""
+        if len(ids) == 0:
+            self._ids = np.array([], dtype=np.int64)
+            self._text_keys = {}
+            self._emotion_tags = {}
+            self._matrix = None
+            return
+
+        self._ids = np.array(ids, dtype=np.int64)
+        self._text_keys = dict(text_keys)
+        self._emotion_tags = dict(emotion_tags)
+        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+        norms[norms < 1e-12] = 1.0
+        self._matrix = (matrix / norms).astype(np.float32)
+
+    def get_text_key(self, expr_id: int) -> Optional[str]:
+        return self._text_keys.get(expr_id)
+
+    def get_emotion_tag(self, expr_id: int) -> Optional[str]:
+        return self._emotion_tags.get(expr_id)
+
+    def get_existing_entries(
+        self, valid_ids: set[int], changed_ids: set[int]
+    ) -> Tuple[List[int], np.ndarray, Dict[int, str], Dict[int, str]]:
+        """提取未变更的已有条目，返回 (ids, matrix_rows, text_keys, emotion_tags)。"""
+        if self._matrix is None or len(self._ids) == 0:
+            return [], np.empty((0, 0), dtype=np.float32), {}, {}
+
+        mask = np.array([
+            (int(eid) in valid_ids and int(eid) not in changed_ids)
+            for eid in self._ids
+        ], dtype=bool)
+
+        kept_ids = self._ids[mask].tolist()
+        kept_matrix = self._matrix[mask]
+        kept_text_keys = {eid: self._text_keys[eid] for eid in kept_ids if eid in self._text_keys}
+        kept_emotion_tags = {eid: self._emotion_tags[eid] for eid in kept_ids if eid in self._emotion_tags}
+        return kept_ids, kept_matrix, kept_text_keys, kept_emotion_tags
+
+    def mark_refreshed(self) -> None:
+        self._last_refresh_time = time.time()
+        self._refreshing = False
+
+    def set_refreshing(self) -> None:
+        self._refreshing = True
+
+    def search(
+        self,
+        query_vector: np.ndarray,
+        threshold: float,
+        max_count: int,
+    ) -> List[Tuple[int, float]]:
+        """向量检索，返回 (id, score) 列表。"""
+        if self._matrix is None or len(self._ids) == 0:
+            return []
+
+        scores = self._matrix @ query_vector
+
+        above_threshold = scores >= threshold
+        if not above_threshold.any():
+            return []
+
+        filtered_scores = scores[above_threshold]
+        filtered_ids = self._ids[above_threshold]
+
+        if len(filtered_scores) <= max_count:
+            top_indices = np.argsort(-filtered_scores)
+        else:
+            top_indices = np.argpartition(-filtered_scores, max_count)[:max_count]
+            top_indices = top_indices[np.argsort(-filtered_scores[top_indices])]
+
+        return [(int(filtered_ids[i]), float(filtered_scores[i])) for i in top_indices]
+
+    def save_to_disk(self, cache_dir: Path) -> None:
+        """将向量缓存持久化到磁盘。"""
+        if self._matrix is None or len(self._ids) == 0:
+            return
+
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(
+                cache_dir / _VECTOR_CACHE_FILE,
+                ids=self._ids,
+                matrix=self._matrix,
+            )
+            meta = {
+                "text_keys": {str(k): v for k, v in self._text_keys.items()},
+                "emotion_tags": {str(k): v for k, v in self._emotion_tags.items()},
+            }
+            (cache_dir / _VECTOR_CACHE_META_FILE).write_text(
+                json.dumps(meta, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception as exc:
+            logger.warning(f"向量缓存持久化失败: {exc}")
+
+    def load_from_disk(self, cache_dir: Path) -> bool:
+        """从磁盘加载向量缓存，成功返回 True。"""
+        npz_path = cache_dir / _VECTOR_CACHE_FILE
+        meta_path = cache_dir / _VECTOR_CACHE_META_FILE
+
+        if not npz_path.exists() or not meta_path.exists():
+            return False
+
+        try:
+            with np.load(npz_path) as data:
+                self._ids = data["ids"].astype(np.int64)
+                self._matrix = data["matrix"].astype(np.float32)
+
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            self._text_keys = {int(k): v for k, v in meta.get("text_keys", {}).items()}
+            self._emotion_tags = {int(k): v for k, v in meta.get("emotion_tags", {}).items()}
+            self._last_refresh_time = time.time()
+            return True
+        except Exception as exc:
+            logger.warning(f"从磁盘加载向量缓存失败: {exc}")
+            return False
 
 
 # ─── 插件主类 ───────────────────────────────────────────────────
 
 
 class EmojiTextSelectorPlugin(MaiBotPlugin):
-    """纯文本情绪标签匹配的表情包选择插件。"""
+    """表情包选择插件，支持语义向量匹配 + 文本 LLM 选择两级策略。"""
 
     config_model: ClassVar[type[PluginConfigBase] | None] = EmojiTextSelectorConfig
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._cache = EmojiEmbeddingCache()
+        self._refresh_task: Optional[asyncio.Task] = None
+        self._plugin_dir: Optional[Path] = None
 
     @classmethod
     def build_config_schema(
@@ -251,24 +461,233 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
     def get_components(self) -> list[dict[str, Any]]:
         components = super().get_components()
         for comp in components:
-            inner = comp.get("metadata", {}).get("metadata")
+            meta = comp.get("metadata")
+            if not isinstance(meta, dict):
+                continue
+            inner = meta.get("metadata")
             if isinstance(inner, dict) and "core_tool" in inner:
-                comp["metadata"]["core_tool"] = inner["core_tool"]
+                meta["core_tool"] = inner["core_tool"]
         return components
 
     # ─── 生命周期 ────────────────────────────────────────────
 
     async def on_load(self) -> None:
-        self.ctx.logger.info("[EmojiTextSelector] 插件已加载")
+        self._plugin_dir = Path(__file__).parent
+        cache_dir = self._plugin_dir / ".cache"
+
+        if self._cache.load_from_disk(cache_dir):
+            logger.info(f"[EmojiTextSelector] 从磁盘恢复向量缓存成功，共 {self._cache.count} 条")
+
+        self._refresh_task = asyncio.create_task(self._background_refresh_loop())
+        logger.info("[EmojiTextSelector] 插件已加载")
 
     async def on_unload(self) -> None:
-        self.ctx.logger.info("[EmojiTextSelector] 插件已卸载")
+        if self._refresh_task is not None:
+            self._refresh_task.cancel()
+            self._refresh_task = None
+
+        if self._plugin_dir is not None:
+            self._cache.save_to_disk(self._plugin_dir / ".cache")
+
+        logger.info("[EmojiTextSelector] 插件已卸载")
 
     async def on_config_update(
         self, scope: str, config_data: dict[str, Any], version: str
     ) -> None:
         if scope == "self":
             self.set_plugin_config(config_data)
+
+    # ─── 向量缓存刷新 ────────────────────────────────────────
+
+    async def _background_refresh_loop(self) -> None:
+        """后台定时刷新向量缓存。"""
+        await asyncio.sleep(5)
+        while True:
+            try:
+                interval = self.config.semantic.refresh_interval_seconds
+                if self._cache.needs_refresh(interval):
+                    await self._refresh_cache()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.error(f"[EmojiTextSelector] 向量缓存刷新失败: {exc}")
+            await asyncio.sleep(30)
+
+    async def _refresh_cache(self) -> None:
+        """从表情包库加载情绪标签和描述，增量计算 embedding 向量。"""
+        self._cache.set_refreshing()
+        refresh_start = time.time()
+        try:
+            try:
+                emotions: list[str] = await self.ctx.emoji.get_emotions()
+            except Exception as exc:
+                logger.warning(f"[EmojiTextSelector] 获取情绪标签失败: {exc}")
+                return
+
+            if not emotions:
+                return
+
+            # 并发获取每个标签的代表表情包
+            semaphore = asyncio.Semaphore(10)
+
+            async def _fetch_one(tag: str) -> tuple[str, Any]:
+                async with semaphore:
+                    try:
+                        return tag, await self.ctx.emoji.get_by_description(tag)
+                    except Exception as exc:
+                        logger.debug(f"[EmojiTextSelector] get_by_description('{tag}') 异常: {exc}")
+                        return tag, None
+
+            results = await asyncio.gather(*(_fetch_one(t) for t in emotions))
+
+            # 按 description 去重，构建待嵌入数据
+            valid_ids: set[int] = set()
+            changed_ids: set[int] = set()
+            texts_to_embed: List[Tuple[int, str]] = []
+
+            for idx, (tag, emoji_dict) in enumerate(results):
+                if not isinstance(emoji_dict, dict) or not emoji_dict.get("description"):
+                    continue
+                desc = str(emoji_dict.get("description", "")).strip()
+                if not desc:
+                    continue
+
+                cache_id = idx
+                valid_ids.add(cache_id)
+                text_key = desc
+
+                if self._cache.get_text_key(cache_id) != text_key:
+                    changed_ids.add(cache_id)
+                    texts_to_embed.append((cache_id, text_key))
+
+            # 保留所有已有条目（包括变更的）作为 embedding 失败时的 fallback
+            kept_ids, kept_matrix, kept_text_keys, kept_emotion_tags = (
+                self._cache.get_existing_entries(valid_ids, set())
+            )
+
+            # 分批计算新增/变更的 embedding
+            BATCH_SIZE = 64
+            new_ids: List[int] = []
+            new_vectors: List[List[float]] = []
+            new_text_keys: Dict[int, str] = {}
+            new_emotion_tags: Dict[int, str] = {}
+            successfully_embedded: set[int] = set()
+
+            if texts_to_embed:
+                for batch_start in range(0, len(texts_to_embed), BATCH_SIZE):
+                    batch_items = texts_to_embed[batch_start:batch_start + BATCH_SIZE]
+                    batch_texts = [text_key for _, text_key in batch_items]
+                    try:
+                        embed_result = await self.ctx.llm.embed(texts=batch_texts)
+                        if isinstance(embed_result, dict) and embed_result.get("success"):
+                            emb_results = embed_result.get("results", [])
+                            if len(emb_results) < len(batch_items):
+                                dropped = len(batch_items) - len(emb_results)
+                                logger.warning(
+                                    f"[EmojiTextSelector] embedding API 返回结果不足: "
+                                    f"请求 {len(batch_items)} 条，仅收到 {len(emb_results)} 条，"
+                                    f"{dropped} 条描述将回退到旧缓存"
+                                )
+                            for i, (cache_id, text_key) in enumerate(batch_items):
+                                if i < len(emb_results):
+                                    vector = emb_results[i].get("embedding", [])
+                                    if vector:
+                                        new_ids.append(cache_id)
+                                        new_vectors.append(vector)
+                                        new_text_keys[cache_id] = text_key
+                                        tag = results[cache_id][0] if cache_id < len(results) else ""
+                                        new_emotion_tags[cache_id] = tag
+                                        successfully_embedded.add(cache_id)
+                        else:
+                            logger.warning(f"[EmojiTextSelector] 批量 embedding 失败: {embed_result}")
+                    except Exception as exc:
+                        logger.error(f"[EmojiTextSelector] 调用 embedding 服务失败: {exc}")
+                        break
+
+            # 合并：new 覆盖 kept 中的同 id 条目（embedding 成功时用新向量，失败时保留旧向量）
+            new_id_set = set(new_ids)
+            final_ids: List[int] = []
+            final_text_keys: Dict[int, str] = {}
+            final_emotion_tags: Dict[int, str] = {}
+            matrix_rows: List[np.ndarray] = []
+
+            # 先添加 kept 条目，跳过已被新向量覆盖的
+            for i, cid in enumerate(kept_ids):
+                if cid in new_id_set:
+                    continue
+                final_ids.append(cid)
+                final_text_keys[cid] = kept_text_keys.get(cid, "")
+                final_emotion_tags[cid] = kept_emotion_tags.get(cid, "")
+                if kept_matrix.size > 0:
+                    matrix_rows.append(kept_matrix[i])
+
+            # 再添加新的
+            for i, cid in enumerate(new_ids):
+                final_ids.append(cid)
+                final_text_keys[cid] = new_text_keys.get(cid, "")
+                final_emotion_tags[cid] = new_emotion_tags.get(cid, "")
+                matrix_rows.append(np.array(new_vectors[i], dtype=np.float32))
+
+            if matrix_rows:
+                all_matrix = np.vstack(matrix_rows)
+            else:
+                all_matrix = np.empty((0, 0), dtype=np.float32)
+
+            self._cache.rebuild(final_ids, final_text_keys, final_emotion_tags, all_matrix)
+
+            # 持久化到磁盘
+            if self._plugin_dir is not None:
+                self._cache.save_to_disk(self._plugin_dir / ".cache")
+
+            refresh_elapsed_ms = (time.time() - refresh_start) * 1000
+            logger.info(
+                f"[EmojiTextSelector] 向量缓存刷新完成，共 {self._cache.count} 条表情包描述，"
+                f"本次新增/更新 {len(new_ids)} 条，耗时 {refresh_elapsed_ms:.0f}ms"
+            )
+        finally:
+            self._cache.mark_refreshed()
+
+    async def _semantic_select(
+        self,
+        query_text: str,
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """语义向量匹配。返回 (matched_tag, matched_description) 或 (None, None)。"""
+        if not query_text.strip():
+            return None, None
+
+        try:
+            embed_result = await self.ctx.llm.embed(text=query_text)
+            if not isinstance(embed_result, dict) or not embed_result.get("success"):
+                logger.warning(f"[EmojiTextSelector] 查询 embedding 失败: {embed_result}")
+                return None, None
+
+            raw_vector = embed_result.get("embedding", [])
+            if not raw_vector:
+                return None, None
+
+            query_vector = np.array(raw_vector, dtype=np.float32)
+            q_norm = np.linalg.norm(query_vector)
+            if q_norm < 1e-12:
+                return None, None
+            query_vector = query_vector / q_norm
+
+            threshold = self.config.semantic.similarity_threshold
+            top_matches = self._cache.search(query_vector, threshold, max_count=1)
+            if not top_matches:
+                logger.info("[EmojiTextSelector] 语义匹配未找到超过阈值的表情包")
+                return None, None
+
+            best_id, best_score = top_matches[0]
+            matched_tag = self._cache.get_emotion_tag(best_id)
+            matched_desc = self._cache.get_text_key(best_id)
+            logger.info(
+                f"[EmojiTextSelector] 语义匹配命中: tag={matched_tag}, "
+                f"desc={matched_desc}, score={best_score:.3f}"
+            )
+            return matched_tag, matched_desc
+        except Exception as exc:
+            logger.error(f"[EmojiTextSelector] 语义匹配异常: {exc}")
+            return None, None
 
     # ─── Tool: select_emoji ──────────────────────────────────
 
@@ -279,7 +698,7 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
             ToolParameterInfo(
                 name="emotion_hint",
                 param_type=ToolParamType.STRING,
-                description="可选的情绪提示词，帮助模型更准确地选择表情包",
+                description="你想通过表情包表达的情感或态度，例如：'对刚才的玩笑表示开心和赞同'、'表达无奈和吐槽'、'给对方鼓励和安慰'",
                 required=False,
             ),
         ],
@@ -293,10 +712,9 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
     ) -> dict[str, Any]:
         """处理 select_emoji 工具调用。
 
-        1. 获取全量情绪标签，并发为每个标签取回一张代表性表情包
-        2. 获取当前对话上下文作为额外参考
-        3. 去重后把表情包描述编号发给文本 LLM 选择一个
-        4. 发送选中的表情包，匹配失败则返回 error（不随机兜底）
+        1. 如果启用语义匹配且缓存就绪，优先使用 embedding 向量匹配
+        2. 向量匹配失败则降级为文本 LLM 选择
+        3. 两级都失败则返回 error
         """
         del kwargs
 
@@ -318,7 +736,7 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                     try:
                         return tag, await self.ctx.emoji.get_by_description(tag)
                     except Exception as exc:
-                        self.ctx.logger.debug(
+                        logger.debug(
                             f"[EmojiTextSelector] get_by_description('{tag}') 异常: {exc}"
                         )
                         return tag, None
@@ -333,7 +751,7 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                         return ""
                     return _build_conversation_context(messages)
                 except Exception as exc:
-                    self.ctx.logger.debug(
+                    logger.debug(
                         f"[EmojiTextSelector] 获取对话上下文异常: {exc}"
                     )
                     return ""
@@ -346,7 +764,7 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
             # 4. 按 description 去重，构建编号→表情包映射
             desc_to_emoji: dict[str, dict[str, str]] = {}
             ordered_descriptions: list[str] = []
-            for _tag, emoji_dict in results:
+            for tag, emoji_dict in results:
                 if not isinstance(emoji_dict, dict) or not emoji_dict.get("base64"):
                     continue
                 desc = str(emoji_dict.get("description", "")).strip()
@@ -356,20 +774,54 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                 ordered_descriptions.append(desc)
 
             if not ordered_descriptions:
-                self.ctx.logger.error(
+                logger.error(
                     "[EmojiTextSelector] 未能获取任何表情包描述，放弃发送"
                 )
                 return {"success": False, "error": "未能获取任何表情包描述"}
 
-            self.ctx.logger.debug(
+            logger.debug(
                 f"[EmojiTextSelector] 去重后 {len(ordered_descriptions)} 个表情包描述"
             )
 
-            # 5. 调用文本 LLM 选择
+            # ── 5. 语义向量匹配（优先） ──
+            if self.config.semantic.enabled and not self._cache.is_empty:
+                try:
+                    query_text = emotion_hint.strip() if emotion_hint else ""
+                    if not query_text and extra_context:
+                        # 无 emotion_hint 时用对话上下文作为查询
+                        query_text = extra_context[:500]
+
+                    if query_text:
+                        matched_tag, matched_desc = await self._semantic_select(
+                            query_text
+                        )
+                        if matched_tag and matched_desc:
+                            emoji_dict = desc_to_emoji.get(matched_desc)
+                            if emoji_dict and emoji_dict.get("base64"):
+                                send_result = await self.ctx.send.emoji(
+                                    emoji_dict["base64"], stream_id
+                                )
+                                if send_result:
+                                    logger.info(
+                                        f"[EmojiTextSelector] 语义匹配发送成功。"
+                                        f" tag={matched_tag}, desc={matched_desc}"
+                                    )
+                                    return {
+                                        "success": True,
+                                        "content": f"表情包发送成功（{matched_desc}）",
+                                        "description": matched_desc,
+                                        "method": "semantic",
+                                    }
+                except Exception as exc:
+                    logger.warning(
+                        f"[EmojiTextSelector] 语义匹配失败，降级为文本 LLM 选择: {exc}"
+                    )
+
+            # ── 6. 文本 LLM 选择（降级） ──
             prompt = _build_selection_prompt(
                 ordered_descriptions,
                 conversation_context=extra_context,
-                emotion_hint=emotion_hint,
+                emotion_expression=emotion_hint,
             )
             llm_result = await self.ctx.llm.generate(
                 prompt=prompt,
@@ -386,9 +838,9 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
 
             selected_idx = _parse_llm_index(response_text, len(ordered_descriptions))
 
-            # 6. 解析 LLM 选择结果
+            # 7. 解析 LLM 选择结果
             if selected_idx is None:
-                self.ctx.logger.error(
+                logger.error(
                     f"[EmojiTextSelector] LLM 索引解析失败，放弃发送。"
                     f" LLM 返回: {response_text[:200]}"
                 )
@@ -397,12 +849,12 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
             desc = ordered_descriptions[selected_idx - 1]
             chosen = desc_to_emoji.get(desc)
             if not chosen or not chosen.get("base64"):
-                self.ctx.logger.error(
+                logger.error(
                     f"[EmojiTextSelector] 选中编号[{selected_idx}]无匹配表情包，放弃发送"
                 )
                 return {"success": False, "error": "选中编号无匹配表情包"}
 
-            # 7. 发送
+            # 8. 发送
             emoji_base64 = chosen.get("base64", "")
             if not emoji_base64:
                 return {"success": False, "error": "选中表情包的 base64 数据为空"}
@@ -412,8 +864,8 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                 return {"success": False, "error": "发送表情包失败"}
 
             description = chosen.get("description", "")
-            self.ctx.logger.info(
-                f"[EmojiTextSelector] 表情包发送成功。"
+            logger.info(
+                f"[EmojiTextSelector] 文本 LLM 发送成功。"
                 f" 描述: {description}, 命中描述[{selected_idx}]: {desc}"
             )
 
@@ -422,10 +874,11 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                 "content": f"表情包发送成功（{description}）",
                 "description": description,
                 "selected_index": selected_idx,
+                "method": "text_llm",
             }
 
         except Exception as exc:
-            self.ctx.logger.error(
+            logger.error(
                 f"[EmojiTextSelector] 工具执行异常: {exc}", exc_info=True
             )
             return {"success": False, "error": str(exc)}
@@ -444,29 +897,39 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
 
         names_to_remove: set[str] = set()
 
-        if self.config.selector.filter_send_emoji:
+        try:
+            filter_send = self.config.selector.filter_send_emoji
+            discovery_mode = self.config.selector.tool_discovery
+        except RuntimeError:
+            logger.warning(
+                "[EmojiTextSelector] 配置未注入，跳过工具过滤"
+            )
+            return {"modified_kwargs": kwargs}
+
+        if filter_send:
             names_to_remove.add("send_emoji")
 
-        if self.config.selector.tool_discovery == "按需发现":
+        if discovery_mode == "按需发现":
             names_to_remove.add("select_emoji")
 
         if not names_to_remove:
             return {"modified_kwargs": kwargs}
 
         before_count = len(tools)
-        kwargs["tool_definitions"] = [
+        filtered_tools = [
             t for t in tools
             if not (
                 isinstance(t, dict)
                 and t.get("function", {}).get("name") in names_to_remove
             )
         ]
-        after_count = len(kwargs["tool_definitions"])
-        self.ctx.logger.debug(
-            f"[EmojiTextSelector] filter: {before_count} → {after_count} tools, "
-            f"removed: {names_to_remove}"
+        after_count = len(filtered_tools)
+        logger.info(
+            f"[EmojiTextSelector] 工具过滤: {before_count} → {after_count}, "
+            f"移除: {names_to_remove}, filter_send_emoji={filter_send}, "
+            f"tool_discovery={discovery_mode}"
         )
-        return {"modified_kwargs": kwargs}
+        return {"modified_kwargs": {**kwargs, "tool_definitions": filtered_tools}}
 
 
 def create_plugin() -> EmojiTextSelectorPlugin:

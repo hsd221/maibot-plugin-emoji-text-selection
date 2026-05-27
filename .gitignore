@@ -1,1 +1,3 @@
 plugins/emoji_text_selector/config_back/
+__pycache__/
+.cache/

@@ -1,6 +1,6 @@
-# Emoji Text Selector —— 纯文本表情包选择插件
+# Emoji Text Selector —— 智能表情包选择插件
 
-让 MaiBot 在没有视觉模型的情况下，通过纯文本 LLM 完成表情包的情绪标签匹配与发送。
+让 MaiBot 在没有视觉模型的情况下，通过语义向量匹配或文本 LLM 完成表情包选择与发送。
 
 ---
 
@@ -8,7 +8,11 @@
 
 MaiBot 内置的 `send_emoji` 工具通过 VLM 看图选表情，未配置视觉模型时会报错。
 
-这个插件提供纯文本替代方案：将全量情绪标签列表 + 聊天上下文交给文本 LLM 选出最匹配的 1-5 个标签，再通过幂集降级匹配找到最合适的表情包发送。
+本插件提供两级选择策略：
+1. **语义向量匹配**（可选）—— 将表情包描述和当前语境分别 embedding，余弦相似度匹配最贴合的表情包
+2. **文本 LLM 选择** —— 将全量情绪标签 + 聊天上下文交给文本 LLM 选出最匹配的表情包
+
+两级均失败则返回错误，主程序原生 `send_emoji`（VLM）可接管。
 
 ---
 
@@ -26,46 +30,53 @@ git clone https://github.com/hsd221/maibot-plugin-emoji-text-selection.git emoji
 # 重启 MaiBot
 ```
 
-安装后在 WebUI 的插件管理页面启用即可。
-
 ---
 
 ## 配置
 
 ```toml
 [plugin]
+enabled = true
 config_version = "1.0.0"
 
-# 传给 LLM 的最大情绪标签数量，0 表示不限制
-max_emotion_tags = 80
-
-# LLM 最多选择的标签数
+[selector]
+max_emotion_tags = 50        # 传给 LLM 的最大情绪标签数量
 max_selected_tags = 5
+llm_model = "emoji"          # 文本选择用的模型任务名
+filter_send_emoji = true     # 过滤原生 send_emoji，避免 LLM 绕过本插件
+tool_discovery = "始终发现"
 
-# 标签选择用的模型任务名，空字符串表示使用默认 text 模型
-llm_model = ""
+[semantic]
+enabled = false              # 启用语义向量匹配（需配置 embedding 模型）
+refresh_interval_seconds = 300
+similarity_threshold = 0.3
 ```
 
 ---
 
 ## 工作原理
 
-1. Planner 通过 `tool_search` 发现 `select_emoji` 工具
-2. LLM 调用工具时，插件获取全量情绪标签（如 "开心, 赞, 无语, 猫, 狗, ..."）
-3. 调用文本 LLM 从标签列表中选出 1-5 个最匹配当前语境的标签
-4. 插件按幂集降级匹配：全交集 → 2 标签组合 → 单标签 → 随机兜底
-5. 发送选中的表情包
+1. Planner 调用 `select_emoji` 工具，传入想表达的情感（`emotion_hint`）
+2. **语义匹配优先**（若启用）：将情感描述 embedding，与预缓存的表情包描述向量做余弦相似度检索
+3. **文本 LLM 降级**：语义匹配失败则走文本 LLM 从标签列表中选出最匹配的描述
+4. 发送选中的表情包
 
 ---
 
 ## 和内置表情功能的区别
 
-|  | 内置 VLM 表情 | 本插件 |
-|------|-------|------|
-| 选择方式 | 视觉模型拼图选 | 文本标签匹配 |
-| 模型要求 | 必须 VLM | 纯文本模型即可 |
-| 精确度 | 高 | 中（依赖表情的描述覆盖度） |
-| 速度 | 慢（拼图 + VLM） | 快（直接文本推理） |
+|  | 内置 VLM 表情 | 本插件（文本 LLM） | 本插件（语义匹配） |
+|------|-------|------|------|
+| 选择方式 | 视觉模型拼图选 | 文本标签匹配 | embedding 向量匹配 |
+| 模型要求 | 必须 VLM | 纯文本模型 | embedding + 文本模型 |
+| 精确度 | 高 | 中 | 中-高（依赖描述覆盖度） |
+| 速度 | 慢（拼图 + VLM） | 快 | 最快（纯向量检索） |
+
+---
+
+## 致谢
+
+- 语义向量匹配的 embedding 缓存与检索机制参考了 [CharTyr/MaiBot-Better-Expression](https://github.com/CharTyr/MaiBot-Better-Expression) 插件的设计，特此感谢。
 
 ---
 

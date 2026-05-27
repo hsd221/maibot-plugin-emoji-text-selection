@@ -1,4 +1,4 @@
-阅读以下对话上下文，根据对话的情绪基调，从{emoji_count}个表情包描述中选择最匹配的一个：
+阅读以下对话上下文和当前想表达的情感，从{emoji_count}个表情包描述中选择最匹配的一个：
 
 {conversation_context}
 {emotion_hint_block}

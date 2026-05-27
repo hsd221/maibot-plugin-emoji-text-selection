@@ -8,3 +8,8 @@ max_selected_tags = 5
 llm_model = "emoji"
 filter_send_emoji = true
 tool_discovery = "始终发现"
+
+[semantic]
+enabled = false
+refresh_interval_seconds = 300
+similarity_threshold = 0.3
