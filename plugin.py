@@ -774,6 +774,7 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
             # 4. 按 description 去重，构建编号→表情包映射
             desc_to_emoji: dict[str, dict[str, str]] = {}
             ordered_descriptions: list[str] = []
+            tag_to_emoji: dict[str, dict[str, str]] = {}
             for tag, emoji_dict in results:
                 if not isinstance(emoji_dict, dict) or not emoji_dict.get("base64"):
                     continue
@@ -782,6 +783,8 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                     continue
                 desc_to_emoji[desc] = emoji_dict
                 ordered_descriptions.append(desc)
+                if tag:
+                    tag_to_emoji[tag] = emoji_dict
 
             if not ordered_descriptions:
                 logger.error(
@@ -806,7 +809,7 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                             query_text
                         )
                         if matched_tag and matched_desc:
-                            emoji_dict = desc_to_emoji.get(matched_desc)
+                            emoji_dict = tag_to_emoji.get(matched_tag)
                             if emoji_dict and emoji_dict.get("base64"):
                                 send_result = await self.ctx.send.emoji(
                                     emoji_dict["base64"], stream_id
@@ -822,6 +825,10 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                                         "description": matched_desc,
                                         "method": "semantic",
                                     }
+                                else:
+                                    logger.error(
+                                        "[EmojiTextSelector] 语义匹配命中但发送失败"
+                                    )
                 except Exception as exc:
                     logger.warning(
                         f"[EmojiTextSelector] 语义匹配失败，降级为文本 LLM 选择: {exc}"
@@ -871,6 +878,10 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
 
             send_result = await self.ctx.send.emoji(emoji_base64, stream_id)
             if not send_result:
+                logger.error(
+                    f"[EmojiTextSelector] 发送表情包失败。"
+                    f" description={chosen.get('description', '')}"
+                )
                 return {"success": False, "error": "发送表情包失败"}
 
             description = chosen.get("description", "")
