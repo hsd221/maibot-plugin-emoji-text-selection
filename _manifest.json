@@ -1,6 +1,6 @@
 {
   "manifest_version": 2,
-  "version": "2.0.0",
+  "version": "2.0.1",
   "name": "Emoji Text Selector",
   "description": "表情包选择工具。支持 embedding 语义向量匹配和文本 LLM 选择",
   "author": {
