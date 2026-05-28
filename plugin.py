@@ -500,10 +500,13 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
     # ─── 向量缓存刷新 ────────────────────────────────────────
 
     async def _background_refresh_loop(self) -> None:
-        """后台定时刷新向量缓存。"""
+        """后台定时刷新向量缓存。仅在语义匹配启用时运行。"""
         await asyncio.sleep(5)
         while True:
             try:
+                if not self.config.semantic.enabled:
+                    await asyncio.sleep(30)
+                    continue
                 interval = self.config.semantic.refresh_interval_seconds
                 if self._cache.needs_refresh(interval):
                     await self._refresh_cache()
@@ -527,6 +530,12 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
             if not emotions:
                 return
 
+            # 构建 tag → 旧 cache_id 的反向映射，确保同一 tag 跨刷新周期使用稳定 id
+            old_tag_to_id: Dict[str, int] = {
+                v: int(k) for k, v in self._cache._emotion_tags.items()
+            }
+            next_id = max(old_tag_to_id.values()) + 1 if old_tag_to_id else 0
+
             # 并发获取每个标签的代表表情包
             semaphore = asyncio.Semaphore(10)
 
@@ -540,25 +549,30 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
 
             results = await asyncio.gather(*(_fetch_one(t) for t in emotions))
 
-            # 按 description 去重，构建待嵌入数据
+            # 按 description 去重，用 tag 分配稳定的 cache_id
+            seen_descs: set[str] = set()
             valid_ids: set[int] = set()
             changed_ids: set[int] = set()
             texts_to_embed: List[Tuple[int, str]] = []
+            id_to_tag: Dict[int, str] = {}
 
-            for idx, (tag, emoji_dict) in enumerate(results):
+            for tag, emoji_dict in results:
                 if not isinstance(emoji_dict, dict) or not emoji_dict.get("description"):
                     continue
                 desc = str(emoji_dict.get("description", "")).strip()
-                if not desc:
+                if not desc or desc in seen_descs:
                     continue
+                seen_descs.add(desc)
 
-                cache_id = idx
+                cache_id = old_tag_to_id.get(tag, next_id)
+                if cache_id == next_id:
+                    next_id += 1
                 valid_ids.add(cache_id)
-                text_key = desc
+                id_to_tag[cache_id] = tag
 
-                if self._cache.get_text_key(cache_id) != text_key:
+                if self._cache.get_text_key(cache_id) != desc:
                     changed_ids.add(cache_id)
-                    texts_to_embed.append((cache_id, text_key))
+                    texts_to_embed.append((cache_id, desc))
 
             # 保留所有已有条目（包括变更的）作为 embedding 失败时的 fallback
             kept_ids, kept_matrix, kept_text_keys, kept_emotion_tags = (
@@ -595,8 +609,7 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                                         new_ids.append(cache_id)
                                         new_vectors.append(vector)
                                         new_text_keys[cache_id] = text_key
-                                        tag = results[cache_id][0] if cache_id < len(results) else ""
-                                        new_emotion_tags[cache_id] = tag
+                                        new_emotion_tags[cache_id] = id_to_tag.get(cache_id, "")
                                         successfully_embedded.add(cache_id)
                         else:
                             logger.warning(f"[EmojiTextSelector] 批量 embedding 失败: {embed_result}")
@@ -611,7 +624,6 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
             final_emotion_tags: Dict[int, str] = {}
             matrix_rows: List[np.ndarray] = []
 
-            # 先添加 kept 条目，跳过已被新向量覆盖的
             for i, cid in enumerate(kept_ids):
                 if cid in new_id_set:
                     continue
@@ -621,7 +633,6 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                 if kept_matrix.size > 0:
                     matrix_rows.append(kept_matrix[i])
 
-            # 再添加新的
             for i, cid in enumerate(new_ids):
                 final_ids.append(cid)
                 final_text_keys[cid] = new_text_keys.get(cid, "")
@@ -635,7 +646,6 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
 
             self._cache.rebuild(final_ids, final_text_keys, final_emotion_tags, all_matrix)
 
-            # 持久化到磁盘
             if self._plugin_dir is not None:
                 self._cache.save_to_disk(self._plugin_dir / ".cache")
 
