@@ -879,55 +879,26 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
             desc_to_emoji: dict[str, dict[str, str]] = {}
             desc_to_tag: dict[str, str] = {}
             ordered_descriptions: list[str] = []
+            seen_descs: set[str] = set()
+            missing_tags: list[str] = []
             extra_context = ""
 
+            # 先从向量缓存获取描述（如果可用）
+            tag_desc_map: dict[str, str] = {}
             if cache_available:
-                # 从向量缓存直接获取 tag → description 映射
                 tag_desc_map = self._cache.get_tag_description_map()
-                seen_descs: set[str] = set()
-                missing_tags: list[str] = []
 
-                for tag in emotions:
-                    desc = tag_desc_map.get(tag)
-                    if desc and desc not in seen_descs:
-                        seen_descs.add(desc)
-                        desc_to_tag[desc] = tag
-                        ordered_descriptions.append(desc)
-                    elif not desc:
-                        missing_tags.append(tag)
+            for tag in emotions:
+                desc = tag_desc_map.get(tag) if tag_desc_map else None
+                if desc and desc not in seen_descs:
+                    seen_descs.add(desc)
+                    desc_to_tag[desc] = tag
+                    ordered_descriptions.append(desc)
+                elif not desc:
+                    missing_tags.append(tag)
 
-                # 缓存未命中的标签降级到 API 获取
-                if missing_tags:
-                    semaphore = asyncio.Semaphore(
-                        max(1, self.config.semantic.fetch_concurrency)
-                    )
-                    missing_results = await asyncio.gather(*(
-                        self._fetch_one_with_semaphore(t, semaphore)
-                        for t in missing_tags
-                    ))
-                    for tag, emoji_dict in missing_results:
-                        if not isinstance(emoji_dict, dict):
-                            continue
-                        desc = str(emoji_dict.get("description", "")).strip()
-                        if not desc or desc in seen_descs:
-                            continue
-                        seen_descs.add(desc)
-                        desc_to_emoji[desc] = emoji_dict
-                        desc_to_tag[desc] = tag
-                        ordered_descriptions.append(desc)
-
-                    logger.debug(
-                        f"[EmojiTextSelector] 缓存未命中 {len(missing_tags)} 个标签，"
-                        f"API 补齐 {len([r for r in missing_results if isinstance(r[1], dict) and r[1].get('description')])} 个"
-                    )
-
-                extra_context = await self._fetch_conversation_context(stream_id)
-
-                logger.debug(
-                    f"[EmojiTextSelector] （缓存路径）共 {len(ordered_descriptions)} 个表情包描述"
-                )
-            else:
-                # 缓存为空：并发为每个标签取回表情包（原有降级逻辑）
+            # 缓存未命中或缓存不可用时，并行获取缺失标签 + 对话上下文
+            if missing_tags:
                 semaphore = asyncio.Semaphore(
                     max(1, self.config.semantic.fetch_concurrency)
                 )
@@ -935,33 +906,40 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                     asyncio.create_task(
                         self._fetch_one_with_semaphore(t, semaphore)
                     )
-                    for t in emotions
+                    for t in missing_tags
                 ]
                 fetch_tasks.append(asyncio.create_task(
                     self._fetch_conversation_context(stream_id)
                 ))
                 gathered = await asyncio.gather(*fetch_tasks)
                 extra_context = str(gathered.pop())
-                results_raw = gathered
+                missing_raw = gathered
+            else:
+                extra_context = await self._fetch_conversation_context(stream_id)
+                missing_raw: list[Any] = []
 
-                results: list[tuple[str, Any]] = []
-                for item in results_raw:
-                    if isinstance(item, tuple) and len(item) == 2:
-                        results.append(item)
+            for item in missing_raw:
+                if not isinstance(item, tuple) or len(item) != 2:
+                    continue
+                tag, emoji_dict = item
+                if not isinstance(emoji_dict, dict):
+                    continue
+                desc = str(emoji_dict.get("description", "")).strip()
+                if not desc or desc in seen_descs:
+                    continue
+                seen_descs.add(desc)
+                desc_to_emoji[desc] = emoji_dict
+                desc_to_tag[desc] = tag
+                ordered_descriptions.append(desc)
 
-                for tag, emoji_dict in results:
-                    if not isinstance(emoji_dict, dict) or not emoji_dict.get("base64"):
-                        continue
-                    desc = str(emoji_dict.get("description", "")).strip()
-                    if not desc or desc in desc_to_emoji:
-                        continue
-                    desc_to_emoji[desc] = emoji_dict
-                    desc_to_tag[desc] = tag
-                    ordered_descriptions.append(desc)
-
+            if missing_tags:
                 logger.debug(
-                    f"[EmojiTextSelector] （缓存未命中）去重后 {len(ordered_descriptions)} 个表情包描述"
+                    f"[EmojiTextSelector] API 补齐 {len(missing_tags)} 个标签，"
+                    f"成功 {len([r for r in missing_raw if isinstance(r, tuple) and len(r) == 2 and isinstance(r[1], dict) and r[1].get('description')])} 个"
                 )
+            logger.debug(
+                f"[EmojiTextSelector] 共 {len(ordered_descriptions)} 个表情包描述"
+            )
 
             if not ordered_descriptions:
                 logger.error(
@@ -1043,8 +1021,11 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
             selected_desc = ordered_descriptions[selected_idx - 1]
 
             # 6. 获取选中表情包的 base64 并发送
-            if cache_available:
-                # 缓存就绪时：仅对选中的 tag 调用一次 get_by_description
+            chosen = desc_to_emoji.get(selected_desc)
+            if chosen and chosen.get("base64"):
+                emoji_base64 = chosen.get("base64", "")
+                chosen_desc = chosen.get("description", "")
+            else:
                 selected_tag = desc_to_tag.get(selected_desc)
                 if not selected_tag:
                     logger.error(
@@ -1063,16 +1044,6 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                     return {"success": False, "error": "获取表情包返回数据异常"}
                 emoji_base64 = str(emoji_result.get("base64") or "")
                 chosen_desc = str(emoji_result.get("description") or selected_desc).strip()
-            else:
-                # 缓存为空时：从已缓存的 emoji_dict 中取 base64
-                chosen = desc_to_emoji.get(selected_desc)
-                if not chosen or not chosen.get("base64"):
-                    logger.error(
-                        f"[EmojiTextSelector] 选中编号[{selected_idx}]无匹配表情包，放弃发送"
-                    )
-                    return {"success": False, "error": "选中编号无匹配表情包"}
-                emoji_base64 = chosen.get("base64", "")
-                chosen_desc = chosen.get("description", "")
 
             if not emoji_base64:
                 return {"success": False, "error": "选中表情包的 base64 数据为空"}
