@@ -167,9 +167,23 @@ def _build_conversation_context(messages: list[dict[str, Any]]) -> str:
 
         msg_id = msg.get("message_id", "")
         timestamp = msg.get("timestamp", "")
-        user_name = user_info.get("user_nickname", "")
-        user_card = user_info.get("user_cardname", "")
-        content = msg.get("processed_plain_text", "") or ""
+        user_name = (
+            user_info.get("user_nickname")
+            or user_info.get("user_name")
+            or ""
+        )
+        user_card = (
+            user_info.get("user_cardname")
+            or user_info.get("user_card")
+            or ""
+        )
+        content = (
+            msg.get("processed_plain_text")
+            or msg.get("plain_text")
+            or msg.get("content")
+            or msg.get("text")
+            or ""
+        )
 
         if not content.strip():
             continue
