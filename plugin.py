@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -245,42 +246,59 @@ def _build_selection_prompt(
 
 
 def _parse_llm_index(response_text: str, max_count: int) -> int | None:
-    """从 LLM 返回的 JSON 中解析选中的单个编号。解析失败返回 None。"""
+    """从 LLM 返回的 JSON 中解析选中的单个编号。解析失败返回 None。
+
+    遍历所有 JSON 代码块和内联 JSON 对象，而非仅提取第一段。
+    """
     text = (response_text or "").strip()
     if not text:
         return None
 
-    candidates = [text]
-    if "```json" in text:
-        start = text.index("```json") + 7
-        end = text.find("```", start)
-        if end > start:
-            candidates.append(text[start:end].strip())
-    if "```" in text:
-        start = text.index("```") + 3
-        end = text.find("```", start)
-        if end > start:
-            candidates.append(text[start:end].strip())
+    candidates: list[str] = [text]
+
+    # 提取所有 ```json ... ``` 代码块
+    json_block_pattern = re.compile(r"```json\s*(.*?)```", re.DOTALL)
+    for match in json_block_pattern.finditer(text):
+        candidates.append(match.group(1).strip())
+
+    # 提取所有通用 ``` ... ``` 代码块
+    generic_block_pattern = re.compile(r"```\s*(.*?)```", re.DOTALL)
+    for match in generic_block_pattern.finditer(text):
+        candidates.append(match.group(1).strip())
+
+    # 提取内联 JSON 对象
+    inline_json_pattern = re.compile(r"\{[^{}]*\}")
+    for match in inline_json_pattern.finditer(text):
+        candidates.append(match.group(0).strip())
 
     for candidate in candidates:
-        try:
-            data = json.loads(candidate)
-            # 尝试 {"selected": 3} 或 {"selected": [1, 3]}
-            for key in ("selected", "index", "indices"):
-                raw = data.get(key)
-                if isinstance(raw, list) and raw:
-                    try:
-                        idx = int(raw[0])
-                    except (ValueError, TypeError):
-                        continue
-                    if 1 <= idx <= max_count:
-                        return idx
-                if isinstance(raw, (int, float)) and not isinstance(raw, bool):
-                    idx = int(raw)
-                    if 1 <= idx <= max_count:
-                        return idx
-        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
-            continue
+        idx = _try_parse_index(candidate, max_count)
+        if idx is not None:
+            return idx
+
+    return None
+
+
+def _try_parse_index(candidate: str, max_count: int) -> int | None:
+    """尝试从单个 JSON 字符串中解析选中编号。"""
+    try:
+        data = json.loads(candidate)
+    except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+        return None
+
+    for key in ("selected", "index", "indices"):
+        raw = data.get(key)
+        if isinstance(raw, list) and raw:
+            try:
+                idx = int(raw[0])
+            except (ValueError, TypeError):
+                continue
+            if 1 <= idx <= max_count:
+                return idx
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            idx = int(raw)
+            if 1 <= idx <= max_count:
+                return idx
 
     return None
 
