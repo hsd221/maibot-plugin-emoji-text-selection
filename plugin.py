@@ -811,7 +811,6 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
             desc_to_emoji: dict[str, dict[str, str]] = {}
             desc_to_tag: dict[str, str] = {}
             ordered_descriptions: list[str] = []
-            tag_to_emoji: dict[str, dict[str, str]] = {}
             extra_context = ""
 
             if cache_available:
@@ -855,8 +854,6 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                     desc_to_emoji[desc] = emoji_dict
                     desc_to_tag[desc] = tag
                     ordered_descriptions.append(desc)
-                    if tag:
-                        tag_to_emoji[tag] = emoji_dict
 
                 logger.debug(
                     f"[EmojiTextSelector] （缓存未命中）去重后 {len(ordered_descriptions)} 个表情包描述"
@@ -881,47 +878,29 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                             query_text
                         )
                         if matched_tag and matched_desc:
-                            # 获取匹配到的表情包并发送
-                            if cache_available:
-                                # 缓存就绪时需通过 get_by_description 获取 base64
-                                emoji_result = await self.ctx.emoji.get_by_description(matched_tag)
-                                emoji_base64 = ""
-                                if isinstance(emoji_result, dict):
-                                    emoji_base64 = str(emoji_result.get("base64") or "")
-                                if emoji_base64:
-                                    send_result = await self.ctx.send.emoji(
-                                        emoji_base64, stream_id
+                            # 缓存就绪时需通过 get_by_description 获取 base64
+                            emoji_result = await self.ctx.emoji.get_by_description(matched_tag)
+                            emoji_base64 = ""
+                            if isinstance(emoji_result, dict):
+                                emoji_base64 = str(emoji_result.get("base64") or "")
+                            if emoji_base64:
+                                send_result = await self.ctx.send.emoji(
+                                    emoji_base64, stream_id
+                                )
+                                if send_result:
+                                    logger.info(
+                                        f"[EmojiTextSelector] 语义匹配发送成功。"
+                                        f" tag={matched_tag}, desc={matched_desc}"
                                     )
-                                    if send_result:
-                                        logger.info(
-                                            f"[EmojiTextSelector] 语义匹配发送成功。"
-                                            f" tag={matched_tag}, desc={matched_desc}"
-                                        )
-                                        return {
-                                            "success": True,
-                                            "content": f"表情包发送成功（{matched_desc}）",
-                                            "description": matched_desc,
-                                            "method": "semantic",
-                                        }
-                            else:
-                                emoji_dict = tag_to_emoji.get(matched_tag)
-                                if emoji_dict and emoji_dict.get("base64"):
-                                    send_result = await self.ctx.send.emoji(
-                                        emoji_dict["base64"], stream_id
-                                    )
-                                    if send_result:
-                                        logger.info(
-                                            f"[EmojiTextSelector] 语义匹配发送成功。"
-                                            f" tag={matched_tag}, desc={matched_desc}"
-                                        )
-                                        return {
-                                            "success": True,
-                                            "content": f"表情包发送成功（{matched_desc}）",
-                                            "description": matched_desc,
-                                            "method": "semantic",
-                                        }
+                                    return {
+                                        "success": True,
+                                        "content": f"表情包发送成功（{matched_desc}）",
+                                        "description": matched_desc,
+                                        "method": "semantic",
+                                    }
                             logger.error(
-                                "[EmojiTextSelector] 语义匹配命中但发送失败"
+                                "[EmojiTextSelector] 语义匹配命中但发送失败，"
+                                "将降级到文本 LLM 选择"
                             )
                 except Exception as exc:
                     logger.warning(
