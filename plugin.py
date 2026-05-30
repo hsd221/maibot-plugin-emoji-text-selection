@@ -597,12 +597,9 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
 
             # 并发获取每个标签的代表表情包
             semaphore = asyncio.Semaphore(10)
-
-            async def _fetch_one(tag: str) -> tuple[str, Any]:
-                async with semaphore:
-                    return await self._do_fetch_one_emoji(tag)
-
-            results = await asyncio.gather(*(_fetch_one(t) for t in emotions))
+            results = await asyncio.gather(*(
+                self._fetch_one_with_semaphore(t, semaphore) for t in emotions
+            ))
 
             # 按 description 去重，用 tag 分配稳定的 cache_id
             seen_descs: set[str] = set()
@@ -784,6 +781,13 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
             )
             return ""
 
+    async def _fetch_one_with_semaphore(
+        self, tag: str, semaphore: asyncio.Semaphore,
+    ) -> Tuple[str, Any]:
+        """带信号量控制的单表情包获取。"""
+        async with semaphore:
+            return await self._do_fetch_one_emoji(tag)
+
     async def _do_fetch_one_emoji(self, tag: str) -> Tuple[str, Any]:
         """通过 tag 获取单个表情包数据，异常时返回 (tag, None)。"""
         try:
@@ -866,13 +870,11 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
             else:
                 # 缓存为空：并发为每个标签取回表情包（原有降级逻辑）
                 semaphore = asyncio.Semaphore(10)
-
-                async def _fetch_one(tag: str) -> tuple[str, Any]:
-                    async with semaphore:
-                        return await self._do_fetch_one_emoji(tag)
-
                 fetch_tasks: list[asyncio.Task] = [
-                    asyncio.create_task(_fetch_one(t)) for t in emotions
+                    asyncio.create_task(
+                        self._fetch_one_with_semaphore(t, semaphore)
+                    )
+                    for t in emotions
                 ]
                 fetch_tasks.append(asyncio.create_task(
                     self._fetch_conversation_context(stream_id)
