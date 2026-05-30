@@ -45,7 +45,7 @@ class PluginSectionConfig(PluginConfigBase):
         json_schema_extra={"label": "启用"},
     )
     config_version: str = Field(
-        default="1.1.0",
+        default="1.2.0",
         description="配置版本号",
         json_schema_extra={"label": "配置版本"},
     )
@@ -80,6 +80,16 @@ class EmojiSelectorSectionConfig(PluginConfigBase):
         default="始终发现",
         description="始终发现：每次对话都提供 select_emoji 工具；按需发现：LLM 需要时通过 tool_search 自行搜索",
         json_schema_extra={"label": "工具发现模式"},
+    )
+    llm_temperature: float = Field(
+        default=0.7,
+        description="文本 LLM 选择时的采样温度",
+        json_schema_extra={"label": "LLM 温度"},
+    )
+    llm_max_tokens: int = Field(
+        default=64,
+        description="文本 LLM 选择时的最大输出 token 数",
+        json_schema_extra={"label": "LLM 最大 Token"},
     )
 
 
@@ -973,8 +983,8 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
             llm_result = await self.ctx.llm.generate(
                 prompt=prompt,
                 model=self.config.selector.llm_model,
-                temperature=0.7,
-                max_tokens=64,
+                temperature=self.config.selector.llm_temperature,
+                max_tokens=self.config.selector.llm_max_tokens,
             )
 
             response_text = ""
