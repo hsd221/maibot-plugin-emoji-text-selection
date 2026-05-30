@@ -1,6 +1,6 @@
 [plugin]
 enabled = true
-config_version = "1.2.0"
+config_version = "1.3.0"
 
 [selector]
 max_emotion_tags = 50
@@ -10,6 +10,7 @@ filter_send_emoji = true
 tool_discovery = "始终发现"
 llm_temperature = 0.7
 llm_max_tokens = 64
+context_message_limit = 30
 
 [semantic]
 enabled = false

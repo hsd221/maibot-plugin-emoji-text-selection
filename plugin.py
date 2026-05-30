@@ -45,7 +45,7 @@ class PluginSectionConfig(PluginConfigBase):
         json_schema_extra={"label": "启用"},
     )
     config_version: str = Field(
-        default="1.2.0",
+        default="1.3.0",
         description="配置版本号",
         json_schema_extra={"label": "配置版本"},
     )
@@ -90,6 +90,11 @@ class EmojiSelectorSectionConfig(PluginConfigBase):
         default=64,
         description="文本 LLM 选择时的最大输出 token 数",
         json_schema_extra={"label": "LLM 最大 Token"},
+    )
+    context_message_limit: int = Field(
+        default=30,
+        description="获取最近对话上下文的最大消息数量",
+        json_schema_extra={"label": "上下文消息数"},
     )
 
 
@@ -793,7 +798,10 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
         if not stream_id:
             return ""
         try:
-            messages = await self.ctx.message.get_recent(stream_id, limit=30)
+            messages = await self.ctx.message.get_recent(
+                stream_id,
+                limit=max(1, self.config.selector.context_message_limit),
+            )
             if not messages:
                 return ""
             return _build_conversation_context(messages)
