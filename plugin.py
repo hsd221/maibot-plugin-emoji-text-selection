@@ -602,7 +602,6 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
             new_vectors: List[List[float]] = []
             new_text_keys: Dict[int, str] = {}
             new_emotion_tags: Dict[int, str] = {}
-            successfully_embedded: set[int] = set()
 
             if texts_to_embed:
                 for batch_start in range(0, len(texts_to_embed), BATCH_SIZE):
@@ -627,7 +626,6 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                                         new_vectors.append(vector)
                                         new_text_keys[cache_id] = text_key
                                         new_emotion_tags[cache_id] = id_to_tag.get(cache_id, "")
-                                        successfully_embedded.add(cache_id)
                         else:
                             logger.warning(f"[EmojiTextSelector] 批量 embedding 失败: {embed_result}")
                     except Exception as exc:
