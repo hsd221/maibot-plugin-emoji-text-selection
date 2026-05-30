@@ -261,7 +261,7 @@ def _parse_llm_index(response_text: str, max_count: int) -> int | None:
                         continue
                     if 1 <= idx <= max_count:
                         return idx
-                if isinstance(raw, (int, float)):
+                if isinstance(raw, (int, float)) and not isinstance(raw, bool):
                     idx = int(raw)
                     if 1 <= idx <= max_count:
                         return idx
