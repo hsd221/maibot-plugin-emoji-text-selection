@@ -326,6 +326,23 @@ class EmojiEmbeddingCache:
     def get_emotion_tag(self, expr_id: int) -> Optional[str]:
         return self._emotion_tags.get(expr_id)
 
+    def get_tag_description_map(self) -> Dict[str, str]:
+        """从缓存中提取去重后的 tag → description 映射。
+
+        用于 LLM 文本选择阶段：避免为每个 tag 调用一次 get_by_description，
+        直接从缓存获取描述文本。同一 description 对应多个 tag 时只保留第一个。
+        """
+        tag_to_desc: Dict[str, str] = {}
+        seen_descs: set[str] = set()
+        for cache_id in self._ids:
+            cid = int(cache_id)
+            tag = self._emotion_tags.get(cid)
+            desc = self._text_keys.get(cid)
+            if tag and desc and desc not in seen_descs:
+                seen_descs.add(desc)
+                tag_to_desc[tag] = desc
+        return tag_to_desc
+
     def get_existing_entries(
         self, valid_ids: set[int], changed_ids: set[int]
     ) -> Tuple[List[int], np.ndarray, Dict[int, str], Dict[int, str]]:
@@ -725,6 +742,9 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
         1. 如果启用语义匹配且缓存就绪，优先使用 embedding 向量匹配
         2. 向量匹配失败则降级为文本 LLM 选择
         3. 两级都失败则返回 error
+
+        优化：缓存就绪时直接从缓存获取 tag→description 映射，
+        仅在 LLM 选中后对目标 tag 调用一次 get_by_description 获取 base64 发送。
         """
         del kwargs
 
@@ -738,53 +758,89 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
             if max_tags > 0 and len(emotions) > max_tags:
                 emotions = emotions[:max_tags]
 
-            # 2. 并发为每个标签取回一张代表性表情包
-            semaphore = asyncio.Semaphore(10)
-
-            async def _fetch_one(tag: str) -> tuple[str, Any]:
-                async with semaphore:
-                    try:
-                        return tag, await self.ctx.emoji.get_by_description(tag)
-                    except Exception as exc:
-                        logger.debug(
-                            f"[EmojiTextSelector] get_by_description('{tag}') 异常: {exc}"
-                        )
-                        return tag, None
-
-            # 3. 并行拉取对话上下文（与表情包查询同时进行）
-            async def _fetch_context() -> str:
-                if not stream_id:
-                    return ""
-                try:
-                    messages = await self.ctx.message.get_recent(stream_id, limit=30)
-                    if not messages:
-                        return ""
-                    return _build_conversation_context(messages)
-                except Exception as exc:
-                    logger.debug(
-                        f"[EmojiTextSelector] 获取对话上下文异常: {exc}"
-                    )
-                    return ""
-
-            results, extra_context = await asyncio.gather(
-                asyncio.gather(*(_fetch_one(t) for t in emotions)),
-                _fetch_context(),
-            )
-
-            # 4. 按 description 去重，构建编号→表情包映射
+            # 2. 获取表情包描述列表
+            # 缓存就绪时：直接从缓存取 tag→description 映射（零次 get_by_description）
+            # 缓存为空时：降级为并发调用 get_by_description 获取全部
+            cache_available = not self._cache.is_empty
             desc_to_emoji: dict[str, dict[str, str]] = {}
+            desc_to_tag: dict[str, str] = {}
             ordered_descriptions: list[str] = []
             tag_to_emoji: dict[str, dict[str, str]] = {}
-            for tag, emoji_dict in results:
-                if not isinstance(emoji_dict, dict) or not emoji_dict.get("base64"):
-                    continue
-                desc = str(emoji_dict.get("description", "")).strip()
-                if not desc or desc in desc_to_emoji:
-                    continue
-                desc_to_emoji[desc] = emoji_dict
-                ordered_descriptions.append(desc)
-                if tag:
-                    tag_to_emoji[tag] = emoji_dict
+            extra_context = ""
+
+            if cache_available:
+                # 从向量缓存直接获取 tag → description 映射，无需调用 get_by_description
+                tag_desc_map = self._cache.get_tag_description_map()
+                seen_descs: set[str] = set()
+                for tag in emotions:
+                    desc = tag_desc_map.get(tag)
+                    if desc and desc not in seen_descs:
+                        seen_descs.add(desc)
+                        desc_to_tag[desc] = tag
+                        ordered_descriptions.append(desc)
+
+                # 并行拉取对话上下文
+                if stream_id:
+                    try:
+                        messages = await self.ctx.message.get_recent(stream_id, limit=30)
+                        if messages:
+                            extra_context = _build_conversation_context(messages)
+                    except Exception as exc:
+                        logger.debug(
+                            f"[EmojiTextSelector] 获取对话上下文异常: {exc}"
+                        )
+
+                logger.debug(
+                    f"[EmojiTextSelector] （缓存命中）{len(ordered_descriptions)} 个表情包描述"
+                )
+            else:
+                # 缓存为空：并发为每个标签取回表情包（原有降级逻辑）
+                semaphore = asyncio.Semaphore(10)
+
+                async def _fetch_one(tag: str) -> tuple[str, Any]:
+                    async with semaphore:
+                        try:
+                            return tag, await self.ctx.emoji.get_by_description(tag)
+                        except Exception as exc:
+                            logger.debug(
+                                f"[EmojiTextSelector] get_by_description('{tag}') 异常: {exc}"
+                            )
+                            return tag, None
+
+                async def _fetch_context() -> str:
+                    if not stream_id:
+                        return ""
+                    try:
+                        messages = await self.ctx.message.get_recent(stream_id, limit=30)
+                        if not messages:
+                            return ""
+                        return _build_conversation_context(messages)
+                    except Exception as exc:
+                        logger.debug(
+                            f"[EmojiTextSelector] 获取对话上下文异常: {exc}"
+                        )
+                        return ""
+
+                results, extra_context = await asyncio.gather(
+                    asyncio.gather(*(_fetch_one(t) for t in emotions)),
+                    _fetch_context(),
+                )
+
+                for tag, emoji_dict in results:
+                    if not isinstance(emoji_dict, dict) or not emoji_dict.get("base64"):
+                        continue
+                    desc = str(emoji_dict.get("description", "")).strip()
+                    if not desc or desc in desc_to_emoji:
+                        continue
+                    desc_to_emoji[desc] = emoji_dict
+                    desc_to_tag[desc] = tag
+                    ordered_descriptions.append(desc)
+                    if tag:
+                        tag_to_emoji[tag] = emoji_dict
+
+                logger.debug(
+                    f"[EmojiTextSelector] （缓存未命中）去重后 {len(ordered_descriptions)} 个表情包描述"
+                )
 
             if not ordered_descriptions:
                 logger.error(
@@ -792,11 +848,7 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                 )
                 return {"success": False, "error": "未能获取任何表情包描述"}
 
-            logger.debug(
-                f"[EmojiTextSelector] 去重后 {len(ordered_descriptions)} 个表情包描述"
-            )
-
-            # ── 5. 语义向量匹配（优先） ──
+            # ── 3. 语义向量匹配（优先） ──
             if self.config.semantic.enabled and not self._cache.is_empty:
                 try:
                     query_text = emotion_hint.strip() if emotion_hint else ""
@@ -809,32 +861,54 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                             query_text
                         )
                         if matched_tag and matched_desc:
-                            emoji_dict = tag_to_emoji.get(matched_tag)
-                            if emoji_dict and emoji_dict.get("base64"):
-                                send_result = await self.ctx.send.emoji(
-                                    emoji_dict["base64"], stream_id
-                                )
-                                if send_result:
-                                    logger.info(
-                                        f"[EmojiTextSelector] 语义匹配发送成功。"
-                                        f" tag={matched_tag}, desc={matched_desc}"
+                            # 获取匹配到的表情包并发送
+                            if cache_available:
+                                # 缓存就绪时需通过 get_by_description 获取 base64
+                                emoji_result = await self.ctx.emoji.get_by_description(matched_tag)
+                                emoji_base64 = ""
+                                if isinstance(emoji_result, dict):
+                                    emoji_base64 = str(emoji_result.get("base64") or "")
+                                if emoji_base64:
+                                    send_result = await self.ctx.send.emoji(
+                                        emoji_base64, stream_id
                                     )
-                                    return {
-                                        "success": True,
-                                        "content": f"表情包发送成功（{matched_desc}）",
-                                        "description": matched_desc,
-                                        "method": "semantic",
-                                    }
-                                else:
-                                    logger.error(
-                                        "[EmojiTextSelector] 语义匹配命中但发送失败"
+                                    if send_result:
+                                        logger.info(
+                                            f"[EmojiTextSelector] 语义匹配发送成功。"
+                                            f" tag={matched_tag}, desc={matched_desc}"
+                                        )
+                                        return {
+                                            "success": True,
+                                            "content": f"表情包发送成功（{matched_desc}）",
+                                            "description": matched_desc,
+                                            "method": "semantic",
+                                        }
+                            else:
+                                emoji_dict = tag_to_emoji.get(matched_tag)
+                                if emoji_dict and emoji_dict.get("base64"):
+                                    send_result = await self.ctx.send.emoji(
+                                        emoji_dict["base64"], stream_id
                                     )
+                                    if send_result:
+                                        logger.info(
+                                            f"[EmojiTextSelector] 语义匹配发送成功。"
+                                            f" tag={matched_tag}, desc={matched_desc}"
+                                        )
+                                        return {
+                                            "success": True,
+                                            "content": f"表情包发送成功（{matched_desc}）",
+                                            "description": matched_desc,
+                                            "method": "semantic",
+                                        }
+                            logger.error(
+                                "[EmojiTextSelector] 语义匹配命中但发送失败"
+                            )
                 except Exception as exc:
                     logger.warning(
                         f"[EmojiTextSelector] 语义匹配失败，降级为文本 LLM 选择: {exc}"
                     )
 
-            # ── 6. 文本 LLM 选择（降级） ──
+            # ── 4. 文本 LLM 选择（降级） ──
             prompt = _build_selection_prompt(
                 ordered_descriptions,
                 conversation_context=extra_context,
@@ -855,7 +929,7 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
 
             selected_idx = _parse_llm_index(response_text, len(ordered_descriptions))
 
-            # 7. 解析 LLM 选择结果
+            # 5. 解析 LLM 选择结果
             if selected_idx is None:
                 logger.error(
                     f"[EmojiTextSelector] LLM 索引解析失败，放弃发送。"
@@ -863,37 +937,61 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                 )
                 return {"success": False, "error": "LLM 索引解析失败"}
 
-            desc = ordered_descriptions[selected_idx - 1]
-            chosen = desc_to_emoji.get(desc)
-            if not chosen or not chosen.get("base64"):
-                logger.error(
-                    f"[EmojiTextSelector] 选中编号[{selected_idx}]无匹配表情包，放弃发送"
-                )
-                return {"success": False, "error": "选中编号无匹配表情包"}
+            selected_desc = ordered_descriptions[selected_idx - 1]
 
-            # 8. 发送
-            emoji_base64 = chosen.get("base64", "")
+            # 6. 获取选中表情包的 base64 并发送
+            if cache_available:
+                # 缓存就绪时：仅对选中的 tag 调用一次 get_by_description
+                selected_tag = desc_to_tag.get(selected_desc)
+                if not selected_tag:
+                    logger.error(
+                        f"[EmojiTextSelector] 选中描述[{selected_idx}]无对应标签，放弃发送"
+                    )
+                    return {"success": False, "error": "选中描述无对应标签"}
+                try:
+                    emoji_result = await self.ctx.emoji.get_by_description(selected_tag)
+                except Exception as exc:
+                    logger.error(
+                        f"[EmojiTextSelector] get_by_description('{selected_tag}') 异常: {exc}"
+                    )
+                    return {"success": False, "error": f"获取表情包失败: {exc}"}
+
+                if not isinstance(emoji_result, dict):
+                    return {"success": False, "error": "获取表情包返回数据异常"}
+                emoji_base64 = str(emoji_result.get("base64") or "")
+                chosen_desc = str(emoji_result.get("description") or selected_desc).strip()
+            else:
+                # 缓存为空时：从已缓存的 emoji_dict 中取 base64
+                chosen = desc_to_emoji.get(selected_desc)
+                if not chosen or not chosen.get("base64"):
+                    logger.error(
+                        f"[EmojiTextSelector] 选中编号[{selected_idx}]无匹配表情包，放弃发送"
+                    )
+                    return {"success": False, "error": "选中编号无匹配表情包"}
+                emoji_base64 = chosen.get("base64", "")
+                chosen_desc = chosen.get("description", "")
+
             if not emoji_base64:
                 return {"success": False, "error": "选中表情包的 base64 数据为空"}
 
+            # 7. 发送
             send_result = await self.ctx.send.emoji(emoji_base64, stream_id)
             if not send_result:
                 logger.error(
                     f"[EmojiTextSelector] 发送表情包失败。"
-                    f" description={chosen.get('description', '')}"
+                    f" description={chosen_desc}"
                 )
                 return {"success": False, "error": "发送表情包失败"}
 
-            description = chosen.get("description", "")
             logger.info(
                 f"[EmojiTextSelector] 文本 LLM 发送成功。"
-                f" 描述: {description}, 命中描述[{selected_idx}]: {desc}"
+                f" 描述: {chosen_desc}, 命中描述[{selected_idx}]: {selected_desc}"
             )
 
             return {
                 "success": True,
-                "content": f"表情包发送成功（{description}）",
-                "description": description,
+                "content": f"表情包发送成功（{chosen_desc}）",
+                "description": chosen_desc,
                 "selected_index": selected_idx,
                 "method": "text_llm",
             }
