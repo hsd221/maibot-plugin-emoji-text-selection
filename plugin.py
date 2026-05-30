@@ -882,20 +882,49 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
             extra_context = ""
 
             if cache_available:
-                # 从向量缓存直接获取 tag → description 映射，无需调用 get_by_description
+                # 从向量缓存直接获取 tag → description 映射
                 tag_desc_map = self._cache.get_tag_description_map()
                 seen_descs: set[str] = set()
+                missing_tags: list[str] = []
+
                 for tag in emotions:
                     desc = tag_desc_map.get(tag)
                     if desc and desc not in seen_descs:
                         seen_descs.add(desc)
                         desc_to_tag[desc] = tag
                         ordered_descriptions.append(desc)
+                    elif not desc:
+                        missing_tags.append(tag)
+
+                # 缓存未命中的标签降级到 API 获取
+                if missing_tags:
+                    semaphore = asyncio.Semaphore(
+                        max(1, self.config.semantic.fetch_concurrency)
+                    )
+                    missing_results = await asyncio.gather(*(
+                        self._fetch_one_with_semaphore(t, semaphore)
+                        for t in missing_tags
+                    ))
+                    for tag, emoji_dict in missing_results:
+                        if not isinstance(emoji_dict, dict):
+                            continue
+                        desc = str(emoji_dict.get("description", "")).strip()
+                        if not desc or desc in seen_descs:
+                            continue
+                        seen_descs.add(desc)
+                        desc_to_emoji[desc] = emoji_dict
+                        desc_to_tag[desc] = tag
+                        ordered_descriptions.append(desc)
+
+                    logger.debug(
+                        f"[EmojiTextSelector] 缓存未命中 {len(missing_tags)} 个标签，"
+                        f"API 补齐 {len([r for r in missing_results if isinstance(r[1], dict) and r[1].get('description')])} 个"
+                    )
 
                 extra_context = await self._fetch_conversation_context(stream_id)
 
                 logger.debug(
-                    f"[EmojiTextSelector] （缓存命中）{len(ordered_descriptions)} 个表情包描述"
+                    f"[EmojiTextSelector] （缓存路径）共 {len(ordered_descriptions)} 个表情包描述"
                 )
             else:
                 # 缓存为空：并发为每个标签取回表情包（原有降级逻辑）
