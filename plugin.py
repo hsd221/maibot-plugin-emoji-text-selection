@@ -281,6 +281,7 @@ class EmojiEmbeddingCache:
         self._ids: np.ndarray = np.array([], dtype=np.int64)
         self._text_keys: Dict[int, str] = {}
         self._emotion_tags: Dict[int, str] = {}
+        self._tag_to_desc: Dict[str, str] = {}
         self._matrix: Optional[np.ndarray] = None
         self._last_refresh_time: float = 0.0
         self._refreshing: bool = False
@@ -310,12 +311,23 @@ class EmojiEmbeddingCache:
             self._ids = np.array([], dtype=np.int64)
             self._text_keys = {}
             self._emotion_tags = {}
+            self._tag_to_desc = {}
             self._matrix = None
             return
 
         self._ids = np.array(ids, dtype=np.int64)
         self._text_keys = dict(text_keys)
         self._emotion_tags = dict(emotion_tags)
+        # 预计算 tag → description 映射，同一 description 对应多个 tag 时只保留第一个
+        tag_to_desc: Dict[str, str] = {}
+        seen_descs: set[str] = set()
+        for cid in ids:
+            tag = emotion_tags.get(cid)
+            desc = text_keys.get(cid)
+            if tag and desc and desc not in seen_descs:
+                seen_descs.add(desc)
+                tag_to_desc[tag] = desc
+        self._tag_to_desc = tag_to_desc
         norms = np.linalg.norm(matrix, axis=1, keepdims=True)
         norms[norms < 1e-12] = 1.0
         self._matrix = (matrix / norms).astype(np.float32)
@@ -326,22 +338,13 @@ class EmojiEmbeddingCache:
     def get_emotion_tag(self, expr_id: int) -> Optional[str]:
         return self._emotion_tags.get(expr_id)
 
-    def get_tag_description_map(self) -> Dict[str, str]:
-        """从缓存中提取去重后的 tag → description 映射。
+    def get_tag_to_id_map(self) -> Dict[str, int]:
+        """返回 tag → cache_id 的反向映射，用于跨刷新周期保持同一 tag 的稳定 id。"""
+        return {v: int(k) for k, v in self._emotion_tags.items()}
 
-        用于 LLM 文本选择阶段：避免为每个 tag 调用一次 get_by_description，
-        直接从缓存获取描述文本。同一 description 对应多个 tag 时只保留第一个。
-        """
-        tag_to_desc: Dict[str, str] = {}
-        seen_descs: set[str] = set()
-        for cache_id in self._ids:
-            cid = int(cache_id)
-            tag = self._emotion_tags.get(cid)
-            desc = self._text_keys.get(cid)
-            if tag and desc and desc not in seen_descs:
-                seen_descs.add(desc)
-                tag_to_desc[tag] = desc
-        return tag_to_desc
+    def get_tag_description_map(self) -> Dict[str, str]:
+        """返回去重后的 tag → description 映射，结果在 rebuild 时预计算。"""
+        return dict(self._tag_to_desc)
 
     def get_existing_entries(
         self, valid_ids: set[int], changed_ids: set[int]
@@ -433,6 +436,15 @@ class EmojiEmbeddingCache:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             self._text_keys = {int(k): v for k, v in meta.get("text_keys", {}).items()}
             self._emotion_tags = {int(k): v for k, v in meta.get("emotion_tags", {}).items()}
+            # 恢复预计算的 tag → description 映射
+            tag_to_desc: Dict[str, str] = {}
+            seen_descs: set[str] = set()
+            for cid, tag in self._emotion_tags.items():
+                desc = self._text_keys.get(cid)
+                if desc and desc not in seen_descs:
+                    seen_descs.add(desc)
+                    tag_to_desc[tag] = desc
+            self._tag_to_desc = tag_to_desc
             self._last_refresh_time = time.time()
             return True
         except Exception as exc:
@@ -548,9 +560,7 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                 return
 
             # 构建 tag → 旧 cache_id 的反向映射，确保同一 tag 跨刷新周期使用稳定 id
-            old_tag_to_id: Dict[str, int] = {
-                v: int(k) for k, v in self._cache._emotion_tags.items()
-            }
+            old_tag_to_id: Dict[str, int] = self._cache.get_tag_to_id_map()
             next_id = max(old_tag_to_id.values()) + 1 if old_tag_to_id else 0
 
             # 并发获取每个标签的代表表情包
@@ -591,9 +601,9 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                     changed_ids.add(cache_id)
                     texts_to_embed.append((cache_id, desc))
 
-            # 保留所有已有条目（包括变更的）作为 embedding 失败时的 fallback
+            # 保留已有条目（排除变更的，其旧向量将在后面被新向量覆盖）
             kept_ids, kept_matrix, kept_text_keys, kept_emotion_tags = (
-                self._cache.get_existing_entries(valid_ids, set())
+                self._cache.get_existing_entries(valid_ids, changed_ids)
             )
 
             # 分批计算新增/变更的 embedding
