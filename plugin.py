@@ -429,7 +429,7 @@ class EmojiEmbeddingCache:
             return False
 
         try:
-            with np.load(npz_path) as data:
+            with np.load(npz_path, allow_pickle=False) as data:
                 self._ids = data["ids"].astype(np.int64)
                 self._matrix = data["matrix"].astype(np.float32)
 
