@@ -536,7 +536,7 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
         self._plugin_dir = Path(__file__).parent
         cache_dir = self._plugin_dir / ".cache"
 
-        if self._cache.load_from_disk(cache_dir):
+        if self.config.semantic.enabled and self._cache.load_from_disk(cache_dir):
             logger.info(f"[EmojiTextSelector] 从磁盘恢复向量缓存成功，共 {self._cache.count} 条")
 
         self._refresh_task = asyncio.create_task(self._background_refresh_loop())
@@ -839,7 +839,9 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
             # 2. 获取表情包描述列表
             # 缓存就绪时：直接从缓存取 tag→description 映射（零次 get_by_description）
             # 缓存为空时：降级为并发调用 get_by_description 获取全部
-            cache_available = not self._cache.is_empty
+            cache_available = (
+                self.config.semantic.enabled and not self._cache.is_empty
+            )
             desc_to_emoji: dict[str, dict[str, str]] = {}
             desc_to_tag: dict[str, str] = {}
             ordered_descriptions: list[str] = []
