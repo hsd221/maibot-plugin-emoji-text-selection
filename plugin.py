@@ -81,16 +81,6 @@ class EmojiSelectorSectionConfig(PluginConfigBase):
         description="始终发现：每次对话都提供 select_emoji 工具；按需发现：LLM 需要时通过 tool_search 自行搜索",
         json_schema_extra={"label": "工具发现模式"},
     )
-    llm_temperature: float = Field(
-        default=0.7,
-        description="文本 LLM 选择时的采样温度",
-        json_schema_extra={"label": "LLM 温度"},
-    )
-    llm_max_tokens: int = Field(
-        default=64,
-        description="文本 LLM 选择时的最大输出 token 数",
-        json_schema_extra={"label": "LLM 最大 Token"},
-    )
     context_message_limit: int = Field(
         default=30,
         description="获取最近对话上下文的最大消息数量",
@@ -998,8 +988,6 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
             llm_result = await self.ctx.llm.generate(
                 prompt=prompt,
                 model=self.config.selector.llm_model,
-                temperature=self.config.selector.llm_temperature,
-                max_tokens=self.config.selector.llm_max_tokens,
             )
 
             response_text = ""

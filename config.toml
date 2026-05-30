@@ -8,8 +8,6 @@ max_selected_tags = 5
 llm_model = "emoji"
 filter_send_emoji = true
 tool_discovery = "始终发现"
-llm_temperature = 0.7
-llm_max_tokens = 64
 context_message_limit = 30
 
 [semantic]
