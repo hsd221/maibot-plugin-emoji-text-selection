@@ -613,30 +613,47 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                 for batch_start in range(0, len(texts_to_embed), BATCH_SIZE):
                     batch_items = texts_to_embed[batch_start:batch_start + BATCH_SIZE]
                     batch_texts = [text_key for _, text_key in batch_items]
-                    try:
-                        embed_result = await self.ctx.llm.embed(texts=batch_texts)
-                        if isinstance(embed_result, dict) and embed_result.get("success"):
-                            emb_results = embed_result.get("results", [])
-                            if len(emb_results) < len(batch_items):
-                                dropped = len(batch_items) - len(emb_results)
+
+                    embed_result = None
+                    for attempt in range(2):
+                        try:
+                            embed_result = await self.ctx.llm.embed(texts=batch_texts)
+                            break
+                        except Exception as exc:
+                            if attempt == 0:
                                 logger.warning(
-                                    f"[EmojiTextSelector] embedding API 返回结果不足: "
-                                    f"请求 {len(batch_items)} 条，仅收到 {len(emb_results)} 条，"
-                                    f"{dropped} 条描述将回退到旧缓存"
+                                    f"[EmojiTextSelector] embedding 调用失败（第1次），"
+                                    f"10s 后重试: {exc}"
                                 )
-                            for i, (cache_id, text_key) in enumerate(batch_items):
-                                if i < len(emb_results):
-                                    vector = emb_results[i].get("embedding", [])
-                                    if vector:
-                                        new_ids.append(cache_id)
-                                        new_vectors.append(vector)
-                                        new_text_keys[cache_id] = text_key
-                                        new_emotion_tags[cache_id] = id_to_tag.get(cache_id, "")
-                        else:
-                            logger.warning(f"[EmojiTextSelector] 批量 embedding 失败: {embed_result}")
-                    except Exception as exc:
-                        logger.error(f"[EmojiTextSelector] 调用 embedding 服务失败: {exc}")
-                        break
+                                await asyncio.sleep(10)
+                            else:
+                                logger.error(
+                                    f"[EmojiTextSelector] embedding 调用失败（第2次），"
+                                    f"跳过当前批次 ({len(batch_items)} 条): {exc}"
+                                )
+
+                    if embed_result is None:
+                        continue
+
+                    if isinstance(embed_result, dict) and embed_result.get("success"):
+                        emb_results = embed_result.get("results", [])
+                        if len(emb_results) < len(batch_items):
+                            dropped = len(batch_items) - len(emb_results)
+                            logger.warning(
+                                f"[EmojiTextSelector] embedding API 返回结果不足: "
+                                f"请求 {len(batch_items)} 条，仅收到 {len(emb_results)} 条，"
+                                f"{dropped} 条描述将回退到旧缓存"
+                            )
+                        for i, (cache_id, text_key) in enumerate(batch_items):
+                            if i < len(emb_results):
+                                vector = emb_results[i].get("embedding", [])
+                                if vector:
+                                    new_ids.append(cache_id)
+                                    new_vectors.append(vector)
+                                    new_text_keys[cache_id] = text_key
+                                    new_emotion_tags[cache_id] = id_to_tag.get(cache_id, "")
+                    else:
+                        logger.warning(f"[EmojiTextSelector] 批量 embedding 失败: {embed_result}")
 
             # 合并：new 覆盖 kept 中的同 id 条目（embedding 成功时用新向量，失败时保留旧向量）
             new_id_set = set(new_ids)
