@@ -45,7 +45,7 @@ class PluginSectionConfig(PluginConfigBase):
         json_schema_extra={"label": "启用"},
     )
     config_version: str = Field(
-        default="1.0.0",
+        default="1.1.0",
         description="配置版本号",
         json_schema_extra={"label": "配置版本"},
     )
@@ -104,6 +104,16 @@ class SemanticSectionConfig(PluginConfigBase):
         default=0.3,
         description="最低余弦相似度阈值，低于此值的表情包不会被选中",
         json_schema_extra={"label": "相似度阈值"},
+    )
+    embed_batch_size: int = Field(
+        default=64,
+        description="每批 embedding 请求的最大文本数量",
+        json_schema_extra={"label": "Embedding 批次大小"},
+    )
+    fetch_concurrency: int = Field(
+        default=10,
+        description="并发获取表情包的信号量上限",
+        json_schema_extra={"label": "获取并发数"},
     )
 
 
@@ -596,7 +606,9 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
             next_id = max(old_tag_to_id.values()) + 1 if old_tag_to_id else 0
 
             # 并发获取每个标签的代表表情包
-            semaphore = asyncio.Semaphore(10)
+            semaphore = asyncio.Semaphore(
+                max(1, self.config.semantic.fetch_concurrency)
+            )
             results = await asyncio.gather(*(
                 self._fetch_one_with_semaphore(t, semaphore) for t in emotions
             ))
@@ -632,15 +644,15 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
             )
 
             # 分批计算新增/变更的 embedding
-            BATCH_SIZE = 64
+            batch_size = max(1, self.config.semantic.embed_batch_size)
             new_ids: List[int] = []
             new_vectors: List[List[float]] = []
             new_text_keys: Dict[int, str] = {}
             new_emotion_tags: Dict[int, str] = {}
 
             if texts_to_embed:
-                for batch_start in range(0, len(texts_to_embed), BATCH_SIZE):
-                    batch_items = texts_to_embed[batch_start:batch_start + BATCH_SIZE]
+                for batch_start in range(0, len(texts_to_embed), batch_size):
+                    batch_items = texts_to_embed[batch_start:batch_start + batch_size]
                     batch_texts = [text_key for _, text_key in batch_items]
 
                     embed_result = None
@@ -869,7 +881,9 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                 )
             else:
                 # 缓存为空：并发为每个标签取回表情包（原有降级逻辑）
-                semaphore = asyncio.Semaphore(10)
+                semaphore = asyncio.Semaphore(
+                    max(1, self.config.semantic.fetch_concurrency)
+                )
                 fetch_tasks: list[asyncio.Task] = [
                     asyncio.create_task(
                         self._fetch_one_with_semaphore(t, semaphore)

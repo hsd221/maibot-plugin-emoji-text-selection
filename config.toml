@@ -1,6 +1,6 @@
 [plugin]
 enabled = true
-config_version = "1.0.0"
+config_version = "1.1.0"
 
 [selector]
 max_emotion_tags = 50
@@ -13,3 +13,5 @@ tool_discovery = "始终发现"
 enabled = false
 refresh_interval_seconds = 300
 similarity_threshold = 0.3
+embed_batch_size = 64
+fetch_concurrency = 10
