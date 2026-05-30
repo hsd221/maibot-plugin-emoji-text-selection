@@ -51,10 +51,27 @@ class PluginSectionConfig(PluginConfigBase):
     )
 
 
-class EmojiSelectorSectionConfig(PluginConfigBase):
-    """表情包选择行为配置。"""
+class GeneralSectionConfig(PluginConfigBase):
+    """插件通用配置。"""
 
-    __ui_label__ = "表情包选择"
+    __ui_label__ = "通用设置"
+
+    filter_send_emoji: bool = Field(
+        default=True,
+        description="启用后从 planner 工具列表移除内置 send_emoji，避免 LLM 绕过本插件直接发送",
+        json_schema_extra={"label": "过滤原生 send_emoji"},
+    )
+    tool_discovery: Literal["始终发现", "按需发现"] = Field(
+        default="始终发现",
+        description="始终发现：每次对话都提供 select_emoji 工具；按需发现：LLM 需要时通过 tool_search 自行搜索",
+        json_schema_extra={"label": "工具发现模式"},
+    )
+
+
+class EmojiSelectorSectionConfig(PluginConfigBase):
+    """LLM 文本选择配置。"""
+
+    __ui_label__ = "LLM 选择"
 
     max_emotion_tags: int = Field(
         default=50,
@@ -71,16 +88,6 @@ class EmojiSelectorSectionConfig(PluginConfigBase):
         description="标签选择用的模型任务名",
         json_schema_extra={"label": "LLM 模型"},
     )
-    filter_send_emoji: bool = Field(
-        default=True,
-        description="启用后从 planner 工具列表移除内置 send_emoji，避免 LLM 绕过本插件直接发送",
-        json_schema_extra={"label": "过滤原生 send_emoji"},
-    )
-    tool_discovery: Literal["始终发现", "按需发现"] = Field(
-        default="始终发现",
-        description="始终发现：每次对话都提供 select_emoji 工具；按需发现：LLM 需要时通过 tool_search 自行搜索",
-        json_schema_extra={"label": "工具发现模式"},
-    )
     context_message_limit: int = Field(
         default=30,
         description="获取最近对话上下文的最大消息数量",
@@ -93,7 +100,7 @@ class SemanticSectionConfig(PluginConfigBase):
 
     __ui_label__ = "语义匹配"
     __ui_icon__ = "search"
-    __ui_order__ = 2
+    __ui_order__ = 3
 
     enabled: bool = Field(
         default=False,
@@ -129,6 +136,9 @@ class EmojiTextSelectorConfig(PluginConfigBase):
 
     plugin: PluginSectionConfig = Field(
         default_factory=PluginSectionConfig,
+    )
+    general: GeneralSectionConfig = Field(
+        default_factory=GeneralSectionConfig,
     )
     selector: EmojiSelectorSectionConfig = Field(
         default_factory=EmojiSelectorSectionConfig,
@@ -1079,8 +1089,8 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
         names_to_remove: set[str] = set()
 
         try:
-            filter_send = self.config.selector.filter_send_emoji
-            discovery_mode = self.config.selector.tool_discovery
+            filter_send = self.config.general.filter_send_emoji
+            discovery_mode = self.config.general.tool_discovery
         except RuntimeError:
             logger.warning(
                 "[EmojiTextSelector] 配置未注入，跳过工具过滤"

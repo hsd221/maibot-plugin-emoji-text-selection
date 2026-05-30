@@ -2,12 +2,14 @@
 enabled = true
 config_version = "1.3.0"
 
+[general]
+filter_send_emoji = true
+tool_discovery = "始终发现"
+
 [selector]
 max_emotion_tags = 50
 max_selected_tags = 5
 llm_model = "emoji"
-filter_send_emoji = true
-tool_discovery = "始终发现"
 context_message_limit = 30
 
 [semantic]
