@@ -789,7 +789,7 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
         try:
             return tag, await self.ctx.emoji.get_by_description(tag)
         except Exception as exc:
-            logger.debug(
+            logger.warning(
                 f"[EmojiTextSelector] get_by_description('{tag}') 异常: {exc}"
             )
             return tag, None
