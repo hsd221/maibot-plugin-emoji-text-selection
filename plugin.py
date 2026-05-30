@@ -837,13 +837,20 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                     async with semaphore:
                         return await self._do_fetch_one_emoji(tag)
 
-                async def _fetch_context() -> str:
-                    return await self._fetch_conversation_context(stream_id)
+                fetch_tasks: list[asyncio.Task] = [
+                    asyncio.create_task(_fetch_one(t)) for t in emotions
+                ]
+                fetch_tasks.append(asyncio.create_task(
+                    self._fetch_conversation_context(stream_id)
+                ))
+                gathered = await asyncio.gather(*fetch_tasks)
+                extra_context = str(gathered.pop())
+                results_raw = gathered
 
-                results, extra_context = await asyncio.gather(
-                    asyncio.gather(*(_fetch_one(t) for t in emotions)),
-                    _fetch_context(),
-                )
+                results: list[tuple[str, Any]] = []
+                for item in results_raw:
+                    if isinstance(item, tuple) and len(item) == 2:
+                        results.append(item)
 
                 for tag, emoji_dict in results:
                     if not isinstance(emoji_dict, dict) or not emoji_dict.get("base64"):
