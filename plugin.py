@@ -568,11 +568,7 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
 
             async def _fetch_one(tag: str) -> tuple[str, Any]:
                 async with semaphore:
-                    try:
-                        return tag, await self.ctx.emoji.get_by_description(tag)
-                    except Exception as exc:
-                        logger.debug(f"[EmojiTextSelector] get_by_description('{tag}') 异常: {exc}")
-                        return tag, None
+                    return await self._do_fetch_one_emoji(tag)
 
             results = await asyncio.gather(*(_fetch_one(t) for t in emotions))
 
@@ -724,6 +720,31 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
             logger.error(f"[EmojiTextSelector] 语义匹配异常: {exc}")
             return None, None
 
+    async def _fetch_conversation_context(self, stream_id: str) -> str:
+        """获取并格式化最近的对话上下文，返回 planner 风格文本。失败返回空字符串。"""
+        if not stream_id:
+            return ""
+        try:
+            messages = await self.ctx.message.get_recent(stream_id, limit=30)
+            if not messages:
+                return ""
+            return _build_conversation_context(messages)
+        except Exception as exc:
+            logger.debug(
+                f"[EmojiTextSelector] 获取对话上下文异常: {exc}"
+            )
+            return ""
+
+    async def _do_fetch_one_emoji(self, tag: str) -> Tuple[str, Any]:
+        """通过 tag 获取单个表情包数据，异常时返回 (tag, None)。"""
+        try:
+            return tag, await self.ctx.emoji.get_by_description(tag)
+        except Exception as exc:
+            logger.debug(
+                f"[EmojiTextSelector] get_by_description('{tag}') 异常: {exc}"
+            )
+            return tag, None
+
     # ─── Tool: select_emoji ──────────────────────────────────
 
     @Tool(
@@ -787,16 +808,7 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                         desc_to_tag[desc] = tag
                         ordered_descriptions.append(desc)
 
-                # 并行拉取对话上下文
-                if stream_id:
-                    try:
-                        messages = await self.ctx.message.get_recent(stream_id, limit=30)
-                        if messages:
-                            extra_context = _build_conversation_context(messages)
-                    except Exception as exc:
-                        logger.debug(
-                            f"[EmojiTextSelector] 获取对话上下文异常: {exc}"
-                        )
+                extra_context = await self._fetch_conversation_context(stream_id)
 
                 logger.debug(
                     f"[EmojiTextSelector] （缓存命中）{len(ordered_descriptions)} 个表情包描述"
@@ -807,27 +819,10 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
 
                 async def _fetch_one(tag: str) -> tuple[str, Any]:
                     async with semaphore:
-                        try:
-                            return tag, await self.ctx.emoji.get_by_description(tag)
-                        except Exception as exc:
-                            logger.debug(
-                                f"[EmojiTextSelector] get_by_description('{tag}') 异常: {exc}"
-                            )
-                            return tag, None
+                        return await self._do_fetch_one_emoji(tag)
 
                 async def _fetch_context() -> str:
-                    if not stream_id:
-                        return ""
-                    try:
-                        messages = await self.ctx.message.get_recent(stream_id, limit=30)
-                        if not messages:
-                            return ""
-                        return _build_conversation_context(messages)
-                    except Exception as exc:
-                        logger.debug(
-                            f"[EmojiTextSelector] 获取对话上下文异常: {exc}"
-                        )
-                        return ""
+                    return await self._fetch_conversation_context(stream_id)
 
                 results, extra_context = await asyncio.gather(
                     asyncio.gather(*(_fetch_one(t) for t in emotions)),
