@@ -45,7 +45,7 @@ class PluginSectionConfig(PluginConfigBase):
         json_schema_extra={"label": "启用"},
     )
     config_version: str = Field(
-        default="2.1.0",
+        default="2.2.0",
         description="配置版本号",
         json_schema_extra={"label": "配置版本"},
     )
@@ -55,6 +55,12 @@ class GeneralSectionConfig(PluginConfigBase):
     """插件通用配置。"""
 
     __ui_label__ = "通用设置"
+
+    concise_logging: bool = Field(
+        default=False,
+        description="将批量获取候选表情包的逐条匹配日志汇总为一句，保留警告和错误；需要主程序支持 quiet 参数",
+        json_schema_extra={"label": "简洁日志"},
+    )
 
     filter_send_emoji: bool = Field(
         default=True,
@@ -627,6 +633,7 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
             results = await asyncio.gather(*(
                 self._fetch_one_with_semaphore(t, semaphore) for t in emotions
             ))
+            self._log_fetch_summary(results)
 
             # 按 description 去重，用 tag 分配稳定的 cache_id
             seen_descs: set[str] = set()
@@ -821,12 +828,28 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
     async def _do_fetch_one_emoji(self, tag: str) -> Tuple[str, Any]:
         """通过 tag 获取单个表情包数据，异常时返回 (tag, None)。"""
         try:
+            if self.config.general.concise_logging:
+                return tag, await self.ctx.call_capability(
+                    "emoji.get_by_description", description=tag, quiet=True,
+                )
             return tag, await self.ctx.emoji.get_by_description(tag)
         except Exception as exc:
             logger.warning(
                 f"[EmojiTextSelector] get_by_description('{tag}') 异常: {exc}"
             )
             return tag, None
+
+    def _log_fetch_summary(self, results: List[Tuple[str, Any]]) -> None:
+        """每次批量获取结束后输出一条汇总。"""
+        if self.config.general.concise_logging:
+            matched = sum(
+                isinstance(emoji, dict) and bool(emoji.get("description"))
+                for _, emoji in results
+            )
+            logger.info(
+                f"[EmojiTextSelector] 候选表情包获取完成：共 {len(results)} 个标签，"
+                f"成功 {matched} 个，未获取 {len(results) - matched} 个"
+            )
 
     # ─── Tool: select_emoji ──────────────────────────────────
 
@@ -914,6 +937,7 @@ class EmojiTextSelectorPlugin(MaiBotPlugin):
                 gathered = await asyncio.gather(*fetch_tasks)
                 extra_context = str(gathered.pop())
                 missing_raw = gathered
+                self._log_fetch_summary(missing_raw)
             else:
                 extra_context = await self._fetch_conversation_context(stream_id)
                 missing_raw: list[Any] = []
